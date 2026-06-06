@@ -9,6 +9,7 @@
  */
 import { isTauriEnv } from "../session.svelte";
 import { isLiveEntry, type SessionEntry, type FocusRequest } from "./registry";
+import { disconnectLive, live as liveConn } from "./liveClient.svelte";
 
 /**
  * Sentinel session id for the bundled demo transcript. It isn't a live pi
@@ -70,6 +71,10 @@ async function poll(): Promise<void> {
 			!live.some((s) => s.sessionId === discovery.selected)
 		) {
 			discovery.selected = null; // the live session we were looking at is gone
+				// The session we were attached to vanished (e.g. pi was SIGKILLed with no close
+				// frame) - tear down the orphaned socket so we do not show a live view for a
+				// dead session.
+				if (liveConn.status === "connected" || liveConn.status === "connecting") disconnectLive();
 		}
 
 		// Consume any new focus request into the pending slot (replacing an older one).

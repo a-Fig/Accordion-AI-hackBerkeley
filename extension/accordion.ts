@@ -421,7 +421,7 @@ export default function accordionLive(pi: ExtensionAPI): void {
 		const ops = await requestPlan(reqId, full, fresh);
 		if (ops === null) return; // couldn't deliver → pass through, don't advance
 		if (epoch !== myEpoch) return; // GUI reconnected mid-flight → don't apply/advance
-		sentCount = all.length; // sync delivered → advance the stream cursor
+		sentCount = Math.max(sentCount, all.length); // advance cursor; never rewind (a message_end during the await may have advanced it further)
 		if (ops.length === 0) return; // empty plan (Milestone 1) → pass through
 
 		return { messages: applyPlan(event.messages as unknown as PiMessage[], ops) as unknown as AgentMessage[] };

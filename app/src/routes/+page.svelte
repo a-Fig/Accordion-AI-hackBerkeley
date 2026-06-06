@@ -18,6 +18,17 @@
 	);
 	const demoSelected = $derived(discovery.selected === DEMO_ID);
 
+	// Drop any open Inspector selection when the underlying store is replaced (session
+	// switch, full resync, demo, or Open) so a stale id cannot resolve against a
+	// different store and pop the Inspector open on the wrong session.
+	let _prevStore: typeof session.store = null;
+	$effect(() => {
+		if (session.store !== _prevStore) {
+			_prevStore = session.store;
+			selectedId = null;
+		}
+	});
+
 	function baseName(p: string): string {
 		return p ? p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p : "";
 	}

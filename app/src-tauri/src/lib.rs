@@ -87,9 +87,15 @@ fn take_focus_request() -> Option<Value> {
     let root = registry_root()?;
     let path = root.join("focus.json");
     let text = fs::read_to_string(&path).ok()?;
-    let value = serde_json::from_str::<Value>(&text).ok();
-    let _ = fs::remove_file(&path); // consume once, even if parsing failed
-    value
+    match serde_json::from_str::<Value>(&text) {
+        Ok(value) => {
+            let _ = fs::remove_file(&path); // consume only a well-formed request
+            Some(value)
+        }
+        // Leave a corrupt/partial file in place so a transient bad write is retried on the
+        // next tick (or overwritten by the next /accordion) instead of silently lost.
+        Err(_) => None,
+    }
 }
 
 /// Bring the main window to the foreground (used when a focus request fires).

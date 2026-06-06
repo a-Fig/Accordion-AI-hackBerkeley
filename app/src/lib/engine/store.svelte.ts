@@ -134,6 +134,9 @@ export class AccordionStore {
 		// tail grew via setProtect) — it springs back to live.
 		this.blocks.forEach((b, i) => {
 			if (i >= protectedFrom && b.override === "folded") {
+				// Protection is absolute, but do not silently erase the user intent - log the
+				// forced unfold so the activity feed shows what happened.
+				this.emit(b.by ?? "auto", "unfolded (protected)", label(b));
 				b.override = null;
 				b.by = null;
 			}

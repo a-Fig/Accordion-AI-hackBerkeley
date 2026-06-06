@@ -61,6 +61,15 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 		if (!isServerMessage(parsed)) return; // ignore anything off-protocol
 		const msg: ServerMessage = parsed;
 		if (msg.type === "hello") {
+				if (msg.protocolVersion !== PROTOCOL_VERSION) {
+					// Refuse a version mismatch loudly rather than driving the session with a wire
+					// shape one side does not understand (in M2 that would silently corrupt the fold
+					// ops / digests applied to the model context).
+					live.status = "error";
+					live.detail = `protocol mismatch - extension v${msg.protocolVersion}, app v${PROTOCOL_VERSION}; update both to the same version`;
+					try { ws.close(); } catch { /* ignore */ }
+					return;
+				}
 			live.status = "connected";
 			session.error = "";
 			session.live = true;
@@ -131,11 +140,17 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 		// Guaranteed teardown (invariant #2): on disconnect, all ghosts vanish with the
 		// GUI state. A ghost cannot outlive the WS connection that spawned it.
 		ghostClearAll();
-		if (socket === ws) socket = null;
-		if (!manualClose && live.status !== "error") {
-			live.status = "idle";
-			live.detail = "disconnected";
-		}
+		// Only the ACTIVE socket may touch shared status. A superseded socket - a prior
+			// connection whose close fires asynchronously after connectLive() already swapped
+			// in a new one and reset manualClose - must NOT run this block, or it clobbers the
+			// new socket's connecting/connected state back to idle.
+			if (socket === ws) {
+				socket = null;
+				if (!manualClose && live.status !== "error") {
+					live.status = "idle";
+					live.detail = "disconnected";
+				}
+			}
 	};
 }
 
