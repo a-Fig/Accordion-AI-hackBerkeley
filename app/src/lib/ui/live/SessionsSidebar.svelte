@@ -137,11 +137,11 @@
 
 		<!-- Bundled demo, pinned at the foot of the list and clearly not live. -->
 		<div class="demo-foot">
-			<button class="row demo" class:sel={demoSelected} onclick={ondemo} title="Bundled sample session — read-only demo">
+			<button class="row demo" class:sel={demoSelected} onclick={ondemo} title="Bundled sample session — a static demo transcript">
 				<span class="dot demo"></span>
 				<span class="body">
 					<span class="t1">Demo session</span>
-					<span class="t2">Bundled sample · read-only</span>
+					<span class="t2">Bundled sample · static</span>
 				</span>
 				<span class="badge">demo</span>
 			</button>
