@@ -17,7 +17,14 @@ export function nextVacated(
 	boundary: number,
 	prevCols: number,
 	cols: number,
+	forceReset = false,
 ): number {
+	// A boundary can move for reasons that are NOT a block aging out of the tail:
+	// the whole session was swapped, or the user dragged the protected-size slider.
+	// Those are clean re-flows, so the caller passes forceReset to drop every hole
+	// rather than mistaking the jump for a flurry of departures.
+	if (forceReset) return 0;
+
 	// A resize changes the grid geometry → everything re-flows regardless, so
 	// holding stale holes would be meaningless. Start clean.
 	if (cols !== prevCols) return 0;
