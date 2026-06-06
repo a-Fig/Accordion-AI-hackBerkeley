@@ -26,20 +26,28 @@
  */
 
 /** Bump on any breaking change to the message shapes below. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
-/** Default loopback port the extension listens on / the GUI dials. */
+/**
+ * Browser dev-loop fallback port only. In the desktop ("pull") model each pi
+ * session binds an EPHEMERAL port and advertises it via the registry (registry.ts),
+ * which the app discovers — so this constant is NOT what a real session listens on.
+ * It is just the default the browser manual-connect input pre-fills.
+ */
 export const DEFAULT_PORT = 4317;
 
 /**
  * A serialisable block — the wire form of engine `Block`, minus the reactive
- * fold state (the GUI owns that). `id` is assigned by the extension and encodes
- * the block's location in pi's message array so a returned op can be applied
- * back without re-deriving anything:
- *   • `m<msgIndex>:p<partIndex>`  — a part of an assistant message
- *     (kind: thinking | text | tool_call)
- *   • `m<msgIndex>:r`             — a tool_result message
- *   • `m<msgIndex>:u`             — a user message
+ * fold state (the GUI owns that). `id` is assigned by the extension using
+ * durable, content-anchored identity — identical whether derived now or after
+ * the message array shifts position:
+ *   • `u:<timestamp>`                      — a user message
+ *   • `a:<responseId|"t"+timestamp>:p<j>`  — part j of an assistant message
+ *     (kind: thinking | text | tool_call); prefers responseId, falls back to timestamp
+ *   • `r:<toolCallId>`                     — a tool_result message
+ *   • `s:<timestamp>`                      — a summary/other message
+ * Fallback (anchor field absent): positional `m<i>:u`, `m<i>:p<j>`, `m<i>:r`,
+ * `m<i>:s` — ensures nothing crashes on malformed messages.
  */
 export interface WireBlock {
 	id: string;
@@ -82,7 +90,26 @@ export interface SyncMessage {
 	blocks: WireBlock[];
 }
 
-export type ServerMessage = HelloMessage | SyncMessage;
+/**
+ * Sent by the extension to inform the GUI that a content part is forming (phase:
+ * "start"), has finished (phase: "end"), or was aborted due to an error (phase:
+ * "abort"). Carries NO content, NO token count — only identity (kind + contentIndex)
+ * and the lifecycle phase. Drives presentation-only ghost state in the GUI.
+ *
+ * contentIndex: the assistantMessageEvent's contentIndex (0-based part index).
+ * When contentIndex < 0 in an "abort" frame it means "clear ALL active ghosts."
+ *
+ * PROTOCOL_VERSION stays at 2 — this entire ADR 0003 ships as one unreleased
+ * protocol version; do NOT bump again here.
+ */
+export interface StreamMessage {
+	type: "stream";
+	phase: "start" | "end" | "abort";
+	kind: "thinking" | "text" | "tool_call";
+	contentIndex: number;
+}
+
+export type ServerMessage = HelloMessage | SyncMessage | StreamMessage;
 
 // ── Client → server (GUI → extension) ────────────────────────────────────────
 
@@ -104,7 +131,7 @@ export type ClientMessage = PlanMessage | AttachMessage;
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 export function isServerMessage(v: unknown): v is ServerMessage {
-	return !!v && typeof v === "object" && "type" in v && ((v as any).type === "hello" || (v as any).type === "sync");
+	return !!v && typeof v === "object" && "type" in v && ((v as any).type === "hello" || (v as any).type === "sync" || (v as any).type === "stream");
 }
 
 export function isClientMessage(v: unknown): v is ClientMessage {

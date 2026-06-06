@@ -7,8 +7,14 @@
  *   linearize(messages) → WireBlock[]   (pi's in-memory messages → our blocks)
  *   applyPlan(messages, ops) → messages (fold a block in place, provider-safely)
  *
- * Block ids encode the source location so a returned op applies without any
- * re-derivation:  m<i>:u (user) · m<i>:p<j> (assistant part) · m<i>:r (tool result).
+ * Block ids are durable and content-anchored — identical whether derived now or
+ * after the message array shifts position:
+ *   • user          → `u:<timestamp>`
+ *   • assistant part j (thinking/text/tool_call) → `a:<responseId ?? "t"+timestamp>:p<j>`
+ *   • tool_result   → `r:<toolCallId>`
+ *   • summary/other → `s:<timestamp>`
+ * Fallback (missing anchor): `m<i>:u`, `m<i>:p<j>`, `m<i>:r`, `m<i>:s` (position-based,
+ * same as the old scheme) — so nothing crashes on malformed messages.
  */
 import type { WireBlock, FoldOp } from "./protocol";
 import type { Block } from "../engine/types";
@@ -40,6 +46,35 @@ export interface PiMessage {
 	toolName?: string;
 	isError?: boolean;
 	summary?: string;
+	/** Set once at message creation; the primary anchor for user/summary/assistant fallback ids. */
+	timestamp?: number;
+	/** Provider-assigned response id; preferred anchor for assistant-message part ids. */
+	responseId?: string;
+}
+
+/**
+ * Compute a durable, content-anchored block id that is IDENTICAL regardless of
+ * where the message sits in the array. Both `linearize` and `applyPlan` must call
+ * this — never inline the formula — so the two can never drift.
+ *
+ * @param m         the pi message
+ * @param i         the message's current array index (used ONLY as a fallback)
+ * @param partIndex for assistant messages, the content-part index; omit for others
+ */
+export function blockId(m: PiMessage, i: number, partIndex?: number): string {
+	switch (m.role) {
+		case "user":
+			return m.timestamp != null ? `u:${m.timestamp}` : `m${i}:u`;
+		case "assistant": {
+			if (partIndex == null) return `m${i}:p?`; // shouldn't happen; defensive only
+			const anchor = m.responseId != null ? m.responseId : m.timestamp != null ? `t${m.timestamp}` : null;
+			return anchor != null ? `a:${anchor}:p${partIndex}` : `m${i}:p${partIndex}`;
+		}
+		case "toolResult":
+			return m.toolCallId != null ? `r:${m.toolCallId}` : `m${i}:r`;
+		default:
+			return m.timestamp != null ? `s:${m.timestamp}` : `m${i}:s`;
+	}
 }
 
 function textOf(content: unknown): string {
@@ -78,17 +113,17 @@ export function linearize(messages: PiMessage[]): WireBlock[] {
 		switch (m.role) {
 			case "user": {
 				turn += 1;
-				push(`m${i}:u`, "user", textOf(m.content));
+				push(blockId(m, i), "user", textOf(m.content));
 				break;
 			}
 			case "assistant": {
 				const parts = Array.isArray(m.content) ? (m.content as PiPart[]) : [];
 				parts.forEach((b, j) => {
-					if (b?.type === "thinking") push(`m${i}:p${j}`, "thinking", (b as PiThinkingPart).thinking || "", { model: m.model });
-					else if (b?.type === "text") push(`m${i}:p${j}`, "text", (b as PiTextPart).text || "", { model: m.model });
+					if (b?.type === "thinking") push(blockId(m, i, j), "thinking", (b as PiThinkingPart).thinking || "", { model: m.model });
+					else if (b?.type === "text") push(blockId(m, i, j), "text", (b as PiTextPart).text || "", { model: m.model });
 					else if (b?.type === "toolCall") {
 						const c = b as PiToolCallPart;
-						push(`m${i}:p${j}`, "tool_call", `${c.name} ${JSON.stringify(c.arguments ?? {})}`, {
+						push(blockId(m, i, j), "tool_call", `${c.name} ${JSON.stringify(c.arguments ?? {})}`, {
 							toolName: c.name,
 							callId: c.id,
 							model: m.model,
@@ -98,7 +133,7 @@ export function linearize(messages: PiMessage[]): WireBlock[] {
 				break;
 			}
 			case "toolResult": {
-				push(`m${i}:r`, "tool_result", textOf(m.content), {
+				push(blockId(m, i), "tool_result", textOf(m.content), {
 					toolName: m.toolName || "tool",
 					callId: m.toolCallId,
 					isError: !!m.isError,
@@ -107,7 +142,7 @@ export function linearize(messages: PiMessage[]): WireBlock[] {
 			}
 			default: {
 				// bash / custom / branchSummary / compactionSummary — surface any summary text
-				if (typeof m.summary === "string" && m.summary) push(`m${i}:s`, "text", m.summary);
+				if (typeof m.summary === "string" && m.summary) push(blockId(m, i), "text", m.summary);
 			}
 		}
 	});
@@ -168,7 +203,7 @@ export function applyPlan(messages: PiMessage[], ops: FoldOp[]): PiMessage[] {
 		if (m.role === "assistant" && Array.isArray(m.content)) {
 			let parts: PiPart[] | null = null; // lazily cloned only if we actually fold
 			(m.content as PiPart[]).forEach((b, j) => {
-				const op = byId.get(`m${i}:p${j}`);
+				const op = byId.get(blockId(m, i, j));
 				if (!op || !op.digestText) return;
 				if (b?.type === "text") {
 					parts ??= (m.content as PiPart[]).slice();
@@ -187,7 +222,7 @@ export function applyPlan(messages: PiMessage[], ops: FoldOp[]): PiMessage[] {
 		}
 
 		if (m.role === "toolResult") {
-			const op = byId.get(`m${i}:r`);
+			const op = byId.get(blockId(m, i));
 			if (op && op.digestText) {
 				changed = true;
 				return { ...m, content: [{ type: "text", text: op.digestText }] };

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { AccordionStore } from "../../engine/store.svelte";
 	import type { Block } from "../../engine/types";
+	import { ghosts, type Ghost } from "../../live/ghostState.svelte";
 
 	let {
 		store,
@@ -173,10 +174,11 @@
 	});
 
 	const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${n}`);
-	function tip(b: Block): string {
+	function tip(b: Block, prot = false): string {
 		const tool = b.toolName ? ` ${b.toolName}` : "";
 		const f = store.isFolded(b) ? ` · folded ${b.tokens}→${store.effTokens(b)}` : "";
-		return `${b.kind}${tool} · ${b.tokens.toLocaleString()} tok${f}\nclick to inspect · double-click to fold`;
+		const action = prot ? "click to inspect · protected — never folds" : "click to inspect · double-click to fold";
+		return `${b.kind}${tool} · ${b.tokens.toLocaleString()} tok${f}\n${action}`;
 	}
 
 	function findId(e: Event): string | null {
@@ -269,27 +271,36 @@
 		onscroll={onScroll}
 	>
 		{#if zoom === "grid"}
-			{#snippet tile(t: { b: Block; face: number })}
+			{#snippet ghostTile(g: Ghost)}
+				<div
+					class="cell ghost k-{g.kind}"
+					title="{g.kind} · forming…"
+				></div>
+			{/snippet}
+			{#snippet tile(t: { b: Block; face: number }, prot: boolean)}
 				<div
 					class="cell face f{t.face} k-{t.b.kind}"
 					class:folded={store.isFolded(t.b)}
 					class:pinned={t.b.override === "pinned"}
 					class:sel={t.b.id === selectedId}
 					data-id={t.b.id}
-					title={tip(t.b)}
+					title={tip(t.b, prot)}
 				></div>
 			{/snippet}
 			<div class="boxes" style:--cell="{cell}px" style:--cols={cols}>
 				{#if olderTiles.length}
 					<section class="box older">
 						<div class="grid">
-							{#each olderTiles as t (t.b.id)}{@render tile(t)}{/each}
+							{#each olderTiles as t (t.b.id)}{@render tile(t, false)}{/each}
 						</div>
 					</section>
 				{/if}
 				<section class="box prot">
 					<div class="grid">
-						{#each protectedTiles as t (t.b.id)}{@render tile(t)}{/each}
+						{#each protectedTiles as t (t.b.id)}{@render tile(t, true)}{/each}
+						{#each ghosts as g (g.contentIndex)}
+							{@render ghostTile(g)}
+						{/each}
 					</div>
 				</section>
 			</div>
@@ -534,6 +545,32 @@
 		box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 0 3px rgba(0, 0, 0, 0.55);
 		filter: brightness(1.18);
 		z-index: 3;
+	}
+
+	/* ---- ghost tiles: third visual state — "forming" ----
+	   A ghost is a presentation-only pulsing placeholder. It is NOT a block, NOT
+	   selectable, and NOT foldable. It uses the same kind color as a real tile but
+	   in a clearly distinct state: reduced opacity pulsing via a compositor-only
+	   opacity animation (transform/opacity only — no filter/box-shadow/gradients,
+	   per CLAUDE.md perf rules). There are at most a few ghosts at a time so one
+	   cheap keyframe each is fine.                                                  */
+	.cell.ghost {
+		cursor: default;
+		/* Compositor-only animation: opacity pulse — no filter, no box-shadow. */
+		animation: ghost-pulse 1.4s ease-in-out infinite;
+		/* Dashed inset ring marks it visually as "not yet real." */
+		box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.35);
+		/* pointer-events: none so it never hijacks clicks/hovers on real tiles */
+		pointer-events: none;
+	}
+	.cell.ghost:hover {
+		/* Override the inherited :hover brightness — ghosts are not interactive. */
+		filter: none;
+		box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.35);
+	}
+	@keyframes ghost-pulse {
+		0%, 100% { opacity: 0.55; transform: scale(1); }
+		50%       { opacity: 0.85; transform: scale(0.93); }
 	}
 
 	/* ---- dice-face pips: token weight read as a die face 1–6 ----
