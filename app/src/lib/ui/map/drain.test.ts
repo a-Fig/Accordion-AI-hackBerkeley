@@ -46,4 +46,19 @@ describe("nextVacated — drain-without-reflow bookkeeping", () => {
 		// degenerate pre-layout state: cols=0, a departure — must terminate.
 		expect(nextVacated(0, 5, 6, 0, 0)).toBe(1);
 	});
+
+	it("forceReset drops every hole regardless of the boundary delta", () => {
+		// Session swap: boundary jumps from a small session to a large one with the
+		// SAME cols — without forceReset this would spray (950-3) mod 40 = 27 holes.
+		expect(nextVacated(0, 3, 950, 40, 40, true)).toBe(0);
+		// Protect-slider drag: boundary jumps up by many in one tick — clean reflow.
+		expect(nextVacated(6, 800, 850, 40, 40, true)).toBe(0);
+		// forceReset wins even when cols is unchanged and there are existing holes.
+		expect(nextVacated(15, 100, 101, 40, 40, true)).toBe(0);
+	});
+
+	it("without forceReset, an unguarded boundary jump still accumulates (regression guard)", () => {
+		// Confirms the bug the reset fixes: a big jump on the same cols would spray holes.
+		expect(nextVacated(0, 3, 950, 40, 40, false)).toBe((950 - 3) % 40);
+	});
 });

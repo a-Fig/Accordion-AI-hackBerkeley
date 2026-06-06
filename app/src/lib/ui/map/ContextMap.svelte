@@ -144,6 +144,8 @@
 	const vacatedCells = $derived(Array.from({ length: vacated }, (_, i) => i));
 	let _prevBoundary = 0;
 	let _prevCols = 0;
+	let _prevStore: AccordionStore | null = null;
+	let _prevProtect = -1;
 
 	// ---- scroll smoothness: while the stage is actively scrolling, suppress
 	//      per-tile :hover. Otherwise ~1k tiles sliding under a STATIONARY cursor
@@ -193,12 +195,19 @@
 
 	// Track the protected boundary so a departing block leaves a hole instead of
 	// reflowing the grid. Reclaim space only when a full leading row is empty, or
-	// when a resize (cols change) re-flows everything anyway.
+	// when a resize (cols change) re-flows everything anyway. A session swap or a
+	// protect-slider drag also moves the boundary but is a clean re-flow, not a
+	// flurry of departures — forceReset drops the holes in those cases.
 	$effect(() => {
+		const st = store;
 		const boundary = store.protectedFromIndex;
+		const protect = store.protectTokens;
 		const c = cols;
 		untrack(() => {
-			vacated = nextVacated(vacated, _prevBoundary, boundary, _prevCols, c);
+			const forceReset = st !== _prevStore || protect !== _prevProtect;
+			vacated = nextVacated(vacated, _prevBoundary, boundary, _prevCols, c, forceReset);
+			_prevStore = st;
+			_prevProtect = protect;
 			_prevCols = c;
 			_prevBoundary = boundary;
 		});
