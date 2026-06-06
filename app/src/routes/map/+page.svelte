@@ -1,11 +1,17 @@
 <script lang="ts">
+	import { onMount } from "svelte";
 	import { session, isTauriEnv, loadSample, openFile } from "$lib/session.svelte.ts";
 	import { connectLive, disconnectLive, live } from "$lib/live/liveClient.svelte";
+	import { discovery, startDiscovery, stopDiscovery, selectSession } from "$lib/live/discovery.svelte";
+	import { DEFAULT_PORT } from "$lib/live/protocol";
+	import type { SessionEntry } from "$lib/live/registry";
+	import SessionsSidebar from "$lib/ui/live/SessionsSidebar.svelte";
 	import MapHeader from "$lib/ui/map/MapHeader.svelte";
 	import ContextMap from "$lib/ui/map/ContextMap.svelte";
 	import Inspector from "$lib/ui/map/Inspector.svelte";
 
 	let selectedId = $state<string | null>(null);
+	let manualPort = $state(DEFAULT_PORT);
 
 	const selected = $derived(
 		session.store && selectedId ? session.store.blocks.find((b) => b.id === selectedId) ?? null : null,
@@ -14,94 +20,146 @@
 	function baseName(p: string): string {
 		return p ? p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p : "";
 	}
+
+	function selectAndConnect(s: SessionEntry): void {
+		if (discovery.selected === s.sessionId && live.status === "connected") return;
+		selectSession(s.sessionId);
+		connectLive(s.port);
+	}
+
+	function onFocusRequest(sessionId: string): void {
+		const s = discovery.sessions.find((x) => x.sessionId === sessionId);
+		if (s) selectAndConnect(s);
+	}
+
+	onMount(() => {
+		startDiscovery(onFocusRequest);
+		return () => {
+			stopDiscovery();
+			disconnectLive();
+		};
+	});
 </script>
 
 <svelte:head><title>Accordion · Map</title></svelte:head>
 
-{#if session.error && !session.store}
-	<div class="fallback">
-		<span class="hero-logo">🪗</span>
-		<p class="err">{session.error}</p>
-		{#if isTauriEnv}
-			<button class="btn-open" onclick={openFile}>Open session file…</button>
-		{/if}
-		<button class="btn-ghost" onclick={loadSample}>Load sample</button>
-	</div>
-{:else if !session.store}
-	<div class="fallback">
-		<span class="hero-logo">🪗</span>
-		<h1>Accordion · Map</h1>
-		<p class="sub">Context-window visualizer for pi and Claude Code sessions</p>
-		{#if isTauriEnv}
-			<button class="btn-open" onclick={openFile}>Open session file…</button>
-			<p class="hint mono">
-				pi → ~/.pi/agent/sessions/ &nbsp;·&nbsp; Claude → ~/.claude/projects/
-			</p>
-		{:else}
-			<p class="hint">Run the native app (<code>npm run tauri dev</code>) to open live sessions.</p>
-		{/if}
-		<button class="btn-open" onclick={() => connectLive()} disabled={live.status === "connecting"}>
-			{live.status === "connecting" ? "Connecting to pi…" : "Connect to live pi session"}
-		</button>
-		<button class="btn-ghost" onclick={loadSample}>Load sample (982 blocks)</button>
-		{#if live.status === "error"}<p class="err">{live.detail}</p>{/if}
-		{#if session.error}<p class="err">{session.error}</p>{/if}
-	</div>
-{:else}
-	{@const s = session.store}
-	<div class="app">
-		<header class="topbar">
-			<div class="brand">
-				<span class="logo">🪗</span>
-				<div class="titles">
-					<div class="t1">
-						{session.filePath ? baseName(session.filePath) : s.meta.title}
-						{#if live.status === "connected"}<span class="live-dot" title="Live — connected to pi"></span>
-						{:else if session.live}<span class="live-dot" title="Live — polling for changes"></span>{/if}
+<div class="shell" class:railed={isTauriEnv}>
+	{#if isTauriEnv}
+		<SessionsSidebar
+			sessions={discovery.sessions}
+			selected={discovery.selected}
+			connected={live.status === "connected"}
+			onselect={selectAndConnect}
+		/>
+	{/if}
+
+	<div class="content">
+		{#if session.store}
+			{@const s = session.store}
+			<div class="app">
+				<header class="topbar">
+					<div class="brand">
+						<span class="logo">🪗</span>
+						<div class="titles">
+							<div class="t1">
+								{session.filePath ? baseName(session.filePath) : s.meta.title}
+								{#if live.status === "connected"}<span class="live-dot" title="Live — connected to pi"></span>
+								{:else if session.live}<span class="live-dot" title="Live — polling for changes"></span>{/if}
+							</div>
+							<div class="t2 mono">
+								{s.meta.model || s.meta.format}
+								{#if s.meta.cwd}· {baseName(s.meta.cwd)}{/if}
+								· map view
+							</div>
+						</div>
 					</div>
-					<div class="t2 mono">
-						{s.meta.model || s.meta.format}
-						{#if s.meta.cwd}· {baseName(s.meta.cwd)}{/if}
-						· map view
+					<div class="nav-row">
+						{#if live.status === "connected"}
+							<button class="nav" onclick={disconnectLive}>Disconnect</button>
+						{:else if isTauriEnv}
+							<button class="nav" onclick={openFile}>Open…</button>
+						{/if}
+						<a class="nav" href="/" data-sveltekit-reload={false}>Classic view →</a>
 					</div>
+				</header>
+
+				<MapHeader store={s} />
+
+				<div class="main" class:open={!!selected}>
+					<div class="canvas">
+						<ContextMap store={s} {selectedId} onselect={(id) => (selectedId = selectedId === id ? null : id)} />
+					</div>
+					{#if selected}
+						<Inspector store={s} block={selected} onclose={() => (selectedId = null)} />
+					{/if}
 				</div>
 			</div>
-			<div class="nav-row">
-				{#if live.status === "connected"}
-					<button class="nav" onclick={disconnectLive}>Disconnect</button>
-				{:else if isTauriEnv}
-					<button class="nav" onclick={openFile}>Open…</button>
+		{:else}
+			<div class="fallback">
+				<span class="hero-logo">🪗</span>
+				<h1>Accordion · Map</h1>
+				{#if isTauriEnv}
+					<p class="sub">
+						{#if discovery.sessions.length}
+							Pick a live pi session on the left to watch its context.
+						{:else}
+							Start <code>pi</code> in a project — it appears in the sidebar automatically.
+						{/if}
+					</p>
+					<button class="btn-open" onclick={openFile}>Open session file…</button>
+					<button class="btn-ghost" onclick={loadSample}>Load sample (982 blocks)</button>
+				{:else}
+					<p class="sub">Context-window visualizer for pi and Claude Code sessions</p>
+					<p class="hint">
+						Live session discovery is a desktop feature — run <code>npm run tauri dev</code>. In the browser you can
+						dial a known port or load the sample.
+					</p>
+					<div class="port-row">
+						<input class="port" type="number" min="1" max="65535" bind:value={manualPort} aria-label="pi port" />
+						<button
+							class="btn-open"
+							onclick={() => connectLive(manualPort)}
+							disabled={live.status === "connecting"}
+						>
+							{live.status === "connecting" ? "Connecting…" : "Connect to port"}
+						</button>
+					</div>
+					<button class="btn-ghost" onclick={loadSample}>Load sample (982 blocks)</button>
 				{/if}
-				<a class="nav" href="/" data-sveltekit-reload={false}>Classic view →</a>
+				{#if live.status === "error"}<p class="err">{live.detail}</p>{/if}
+				{#if session.error}<p class="err">{session.error}</p>{/if}
 			</div>
-		</header>
-
-		<MapHeader store={s} />
-
-		<div class="main" class:open={!!selected}>
-			<div class="canvas">
-				<ContextMap store={s} {selectedId} onselect={(id) => (selectedId = selectedId === id ? null : id)} />
-			</div>
-			{#if selected}
-				<Inspector store={s} block={selected} onclose={() => (selectedId = null)} />
-			{/if}
-		</div>
+		{/if}
 	</div>
-{/if}
+</div>
 
 <style>
-	.app {
+	.shell {
 		height: 100vh;
+		display: flex;
+		overflow: hidden;
+	}
+	.content {
+		flex: 1;
+		min-width: 0;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+	}
+	.app {
+		height: 100%;
 		display: flex;
 		flex-direction: column;
 	}
 	.fallback {
-		height: 100vh;
+		height: 100%;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
 		justify-content: center;
 		gap: 12px;
+		padding: 24px;
+		text-align: center;
 	}
 	.fallback .err {
 		color: var(--danger);
@@ -120,9 +178,29 @@
 		font-size: 13px;
 		color: var(--muted);
 		margin: 0;
+		max-width: 440px;
+	}
+	.sub code,
+	.hint code {
+		background: var(--panel-2);
+		padding: 1px 5px;
+		border-radius: 4px;
+	}
+	.port-row {
+		display: flex;
+		gap: 8px;
+		align-items: center;
+	}
+	.port {
+		width: 96px;
+		padding: 9px 10px;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-sm);
+		background: var(--panel);
+		color: var(--text);
+		font-size: 13px;
 	}
 	.btn-open {
-		margin-top: 8px;
 		background: var(--accent);
 		color: #fff;
 		border: none;
@@ -135,6 +213,10 @@
 	}
 	.btn-open:hover {
 		opacity: 0.85;
+	}
+	.btn-open:disabled {
+		opacity: 0.5;
+		cursor: default;
 	}
 	.btn-ghost {
 		background: transparent;
@@ -154,6 +236,8 @@
 		font-size: 11px;
 		color: var(--faint);
 		margin: 0;
+		max-width: 440px;
+		line-height: 1.5;
 	}
 	.topbar {
 		display: flex;
@@ -217,7 +301,6 @@
 	.nav:hover {
 		background: var(--panel-2);
 	}
-
 	.main {
 		flex: 1;
 		min-height: 0;
