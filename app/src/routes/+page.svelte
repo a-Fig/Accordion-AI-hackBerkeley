@@ -289,6 +289,10 @@
 		font-size: 11px;
 		color: var(--muted);
 	}
+	@keyframes livepulse {
+		0%, 100% { opacity: 1; transform: scale(1); }
+		50% { opacity: .5; transform: scale(.82); }
+	}
 	.live-dot {
 		display: inline-block;
 		width: 7px;
@@ -296,6 +300,7 @@
 		border-radius: 50%;
 		background: var(--ok);
 		flex: 0 0 auto;
+		animation: livepulse var(--dur-slow) ease-in-out infinite;
 	}
 	.nav-row {
 		display: flex;

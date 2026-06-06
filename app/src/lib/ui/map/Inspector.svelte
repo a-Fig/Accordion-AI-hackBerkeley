@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { fly } from "svelte/transition";
+	import { cubicOut } from "svelte/easing";
 	import type { AccordionStore } from "../../engine/store.svelte";
 	import type { Block } from "../../engine/types";
 
@@ -37,7 +39,7 @@
 </script>
 
 {#if block}
-	<aside class="insp">
+	<aside class="insp" transition:fly={{ x: 24, duration: 200, easing: cubicOut, opacity: 0 }}>
 		<header>
 			<span class="kind k-{block.kind}">{KIND_LABEL[block.kind]}</span>
 			{#if block.toolName}<span class="tool mono">{block.toolName}</span>{/if}

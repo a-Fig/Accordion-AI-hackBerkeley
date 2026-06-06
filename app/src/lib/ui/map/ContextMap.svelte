@@ -4,6 +4,7 @@
 	import type { Block } from "../../engine/types";
 	import { ghosts, type Ghost } from "../../live/ghostState.svelte";
 	import { nextVacated } from "./drain";
+	import AnimatedNumber from "$lib/ui/AnimatedNumber.svelte";
 
 	let {
 		store,
@@ -203,7 +204,7 @@
 		});
 	});
 
-	const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${n}`);
+	const k = (n: number) => { n = Math.round(n); return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${n}`; };
 	function tip(b: Block, prot = false): string {
 		const tool = b.toolName ? ` ${b.toolName}` : "";
 		const f = store.isFolded(b) ? ` · folded ${b.tokens}→${store.effTokens(b)}` : "";
@@ -321,7 +322,7 @@
 				{#if olderTiles.length}
 					<section class="box older">
 						<div class="rail" title="{olderTok.toLocaleString()} live tokens · foldable">
-							<span class="tok">{k(olderTok)}</span>
+							<span class="tok"><AnimatedNumber value={olderTok} format={k} /></span>
 						</div>
 						<div class="grid">
 							{#each olderTiles as t (t.b.id)}{@render tile(t, false)}{/each}
@@ -330,7 +331,7 @@
 				{/if}
 				<section class="box prot">
 					<div class="rail" title="{protTok.toLocaleString()} tokens · protected working tail">
-						<span class="tok">{k(protTok)}</span>
+						<span class="tok"><AnimatedNumber value={protTok} format={k} /></span>
 					</div>
 					<div class="grid">
 						{#each vacatedCells as i (i)}<div class="cell vacated"></div>{/each}
@@ -404,7 +405,7 @@
 		font-weight: 600;
 		padding: 4px 13px;
 		border-radius: 5px;
-		transition: background 130ms ease, color 130ms ease;
+		transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 	}
 	.seg button:hover {
 		color: var(--text);
@@ -476,7 +477,7 @@
 		font-size: 12px;
 		padding: 3px 9px;
 		min-width: 26px;
-		transition: background 120ms ease, color 120ms ease;
+		transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 	}
 	.density button:hover {
 		background: var(--panel-3);
@@ -614,11 +615,17 @@
 		filter: none;
 		box-shadow: none;
 	}
+	@keyframes pop {
+		0%   { transform: scale(1); }
+		45%  { transform: scale(1.08); }
+		100% { transform: scale(1); }
+	}
 	.cell.sel {
 		/* inset-only so paint-containment (content-visibility) never clips it */
 		box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 0 3px rgba(0, 0, 0, 0.55);
 		filter: brightness(1.18);
 		z-index: 3;
+		animation: pop var(--dur-fast) var(--ease-spring);
 	}
 
 	/* ---- ghost tiles: third visual state — "forming" ----
@@ -736,7 +743,7 @@
 		min-width: 0;
 		flex-basis: 0;
 		cursor: pointer;
-		transition: filter 90ms ease;
+		transition: filter var(--dur-fast) var(--ease-out);
 	}
 	.rtile:hover {
 		filter: brightness(1.4);

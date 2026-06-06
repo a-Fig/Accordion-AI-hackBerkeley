@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { SessionEntry } from "$lib/live/registry";
+	import AnimatedNumber from "$lib/ui/AnimatedNumber.svelte";
 
 	let {
 		sessions,
@@ -57,8 +58,9 @@
 	}
 	function fmtTokens(n: number | null): string {
 		if (n == null) return "";
-		if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
-		return String(n);
+		const r = Math.round(n);
+		if (r >= 1000) return `${(r / 1000).toFixed(r >= 10000 ? 0 : 1)}k`;
+		return String(r);
 	}
 	function label(s: SessionEntry): string {
 		return baseName(s.cwd) || s.title || "session";
@@ -125,7 +127,7 @@
 								{#if p !== null}
 									<span class="usage" title={`${s.tokens} / ${s.contextWindow} tokens`}>
 										<span class="bar"><span class="fill" class:hot={p >= 80} style:width={`${p}%`}></span></span>
-										<span class="pct mono">{fmtTokens(s.tokens)}</span>
+										<span class="pct mono"><AnimatedNumber value={s.tokens ?? 0} format={fmtTokens} /></span>
 									</span>
 								{/if}
 							</button>
@@ -180,7 +182,7 @@
 		background: transparent;
 		cursor: pointer;
 		flex: 0 0 auto;
-		transition: background 110ms ease, border-color 110ms ease;
+		transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 	}
 	.icon:hover {
 		background: var(--panel-2);
@@ -244,7 +246,7 @@
 		padding: 2px 4px;
 		border-radius: 5px;
 		cursor: pointer;
-		transition: color 110ms ease, background 110ms ease;
+		transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
 	}
 	.collapse:hover {
 		color: var(--text);
@@ -290,7 +292,7 @@
 		background: transparent;
 		cursor: pointer;
 		text-align: left;
-		transition: background 110ms ease, border-color 110ms ease;
+		transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 	}
 	.row:hover {
 		background: var(--panel-2);
@@ -306,9 +308,14 @@
 		flex: 0 0 auto;
 		background: var(--faint);
 	}
+	@keyframes dotpulse {
+		0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+		50%       { box-shadow: 0 0 0 5px color-mix(in srgb, var(--ok) 10%, transparent); }
+	}
 	.dot.on {
 		background: var(--ok);
 		box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent);
+		animation: dotpulse var(--dur-slow) ease-in-out infinite;
 	}
 	.dot.demo {
 		background: transparent;
@@ -355,6 +362,7 @@
 		display: block;
 		height: 100%;
 		background: var(--accent);
+		transition: width var(--dur-mid) var(--ease-out);
 	}
 	.fill.hot {
 		background: var(--danger);
