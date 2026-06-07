@@ -13,9 +13,9 @@
 import { session } from "../session.svelte";
 import { AccordionStore } from "../engine/store.svelte";
 import { wireToBlock } from "./mapping";
-import { computeFoldOps, resolveUnfold } from "./plan";
+import { computeFoldOps, computeGroupOps, resolveUnfold } from "./plan";
 import { folding } from "./folding.svelte";
-import { DEFAULT_PORT, PROTOCOL_VERSION, isServerMessage, type ServerMessage, type PlanMessage, type FoldOp, type UnfoldResultMessage } from "./protocol";
+import { DEFAULT_PORT, PROTOCOL_VERSION, isServerMessage, type ServerMessage, type PlanMessage, type FoldOp, type GroupOp, type UnfoldResultMessage } from "./protocol";
 import { ghostStart, ghostEnd, ghostClearAll } from "./ghostState.svelte";
 
 let socket: WebSocket | null = null;
@@ -37,14 +37,15 @@ export const live = $state<{ status: "idle" | "connecting" | "connected" | "erro
  * still folds locally for the on-screen preview but replies with an EMPTY plan, so
  * the live model call is untouched (M1 behavior). Only when the user explicitly
  * arms folding does this mirror the engine's current fold decisions into wire ops
- * (kind- and durable-id-guarded in `computeFoldOps`). No store ⇒ empty plan.
+ * (kind- and durable-id-guarded in `computeFoldOps`/`computeGroupOps`). No store ⇒
+ * empty plan. Group-collapse ops (ADR 0006) ride the SAME arm — disarmed, no group
+ * collapses a live model call.
  *
  * This is the one place the GUI can alter a real model call; keep it a pure read.
  */
-function computePlan(): FoldOp[] {
-	if (!folding.enabled) return [];
-	if (!session.store) return [];
-	return computeFoldOps(session.store);
+function computePlan(): { ops: FoldOp[]; groups: GroupOp[] } {
+	if (!folding.enabled || !session.store) return { ops: [], groups: [] };
+	return { ops: computeFoldOps(session.store), groups: computeGroupOps(session.store) };
 }
 
 export function connectLive(port: number = DEFAULT_PORT): void {
@@ -140,7 +141,8 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 			// Committed blocks arrive HERE (the appendBlocks path), NEVER from ghost state.
 			// Invariant: a ghost is only removed, never converted to a block.
 			session.store.appendBlocks(msg.blocks.map(wireToBlock));
-			const reply: PlanMessage = { type: "plan", reqId: msg.reqId, ops: computePlan() };
+			const plan = computePlan();
+			const reply: PlanMessage = { type: "plan", reqId: msg.reqId, ops: plan.ops, groups: plan.groups };
 			try {
 				ws.send(JSON.stringify(reply));
 			} catch {

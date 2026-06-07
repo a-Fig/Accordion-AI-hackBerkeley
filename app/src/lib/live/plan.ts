@@ -24,7 +24,7 @@
  */
 import type { AccordionStore } from "../engine/store.svelte";
 import type { Block } from "../engine/types";
-import type { FoldOp, UnfoldRestored } from "./protocol";
+import type { FoldOp, GroupOp, UnfoldRestored } from "./protocol";
 import { isDurableId } from "./mapping";
 import { foldCode, FOLDABLE_KINDS } from "../engine/digest";
 
@@ -37,6 +37,11 @@ export function computeFoldOps(store: AccordionStore): FoldOp[] {
 	const ops: FoldOp[] = [];
 	for (const b of store.blocks) {
 		if (!store.isFolded(b)) continue;
+		// A FOLDED group's members are collapsed by their GroupOp (the whole message is removed
+		// and replaced by the summary). Emitting a per-block FoldOp here too is redundant on the
+		// wire (applyPlan removes the message before any in-place fold runs) AND a trap — the op
+		// would carry the block's own digest, divergent from the group summary. Skip them.
+		if (store.groupOf(b)?.folded) continue;
 		if (!FOLDABLE_KINDS.has(b.kind)) continue; // never user / tool_call
 		if (!isDurableId(b.id)) continue; // durable-id safety guard
 		const digestText = store.digestOf(b);
@@ -44,6 +49,28 @@ export function computeFoldOps(store: AccordionStore): FoldOp[] {
 		ops.push({ id: b.id, digestText });
 	}
 	return ops;
+}
+
+/**
+ * Compute the group-collapse ops for the current store state (ADR 0006): one `GroupOp` per
+ * FOLDED group. `memberIds` is the group's durable member ids — the GUI's *intent*; the
+ * extension's `applyPlan` independently re-derives which whole, balanced, non-backstop
+ * messages it may actually remove (a non-durable member is dropped here too, since a
+ * positional id is not stable across array shifts). `summaryText` is the engine's
+ * single-source-of-truth recap, carrying the one `{#code FOLDED}` tag for the whole range.
+ * Pure read; the store is never mutated.
+ */
+export function computeGroupOps(store: AccordionStore): GroupOp[] {
+	const out: GroupOp[] = [];
+	for (const g of store.groups) {
+		if (!g.folded) continue;
+		const memberIds = g.memberIds.filter(isDurableId);
+		if (!memberIds.length) continue; // nothing durably removable
+		const summaryText = store.groupSummary(g);
+		if (!summaryText) continue;
+		out.push({ id: g.id, memberIds, summaryText });
+	}
+	return out;
 }
 
 /** Short, human-readable label for an unfold confirmation (e.g. "tool_result read_file · turn 12"). */
@@ -76,19 +103,35 @@ export function resolveUnfold(store: AccordionStore, codes: string[]): { restore
 	const restored: UnfoldRestored[] = [];
 	const missing: string[] = [];
 	for (const code of codes) {
+		let hit = false;
+		// A GROUP code (= foldCode(group.id)) restores the WHOLE range: unfold the group, so
+		// its members reflow on the agent's next context (ADR 0006 §6). Checked first; a code
+		// can in principle match both a group and a block (rare collision) → restore both.
+		for (const g of store.groups) {
+			if (g.folded && foldCode(g.id) === code) {
+				store.unfoldGroup(g.id, "agent");
+				restored.push({ code, kind: "text", label: `group · ${g.memberIds.length} blocks` });
+				hit = true;
+			}
+		}
 		// Mirror EXACTLY the set `computeFoldOps` sends: folded, a foldable kind, and a
 		// durable id. So the agent can only ever restore something it was actually shown a
 		// `{#code FOLDED}` tag for — never a human pin, a locally-folded user/tool_call, or
 		// a positional-id block that was never on the wire.
 		const matches = store.blocks.filter((b) => store.isFolded(b) && FOLDABLE_KINDS.has(b.kind) && isDurableId(b.id) && foldCode(b.id) === code);
-		if (!matches.length) {
-			missing.push(code);
-			continue;
-		}
 		for (const b of matches) {
-			store.unfold(b.id, "agent");
+			// A member of a FOLDED group is controlled by the group, not per-block overrides —
+			// `store.unfold` would no-op there (ADR 0006 §2). Route it through `unfoldGroup` so
+			// the reported restore is never a lie. (In practice a collapsed member is removed
+			// from the wire, so the agent only ever holds the group code — but keep the honesty
+			// guarantee LOCAL to this resolver rather than relying on that.)
+			const grp = store.groupOf(b);
+			if (grp?.folded) store.unfoldGroup(grp.id, "agent");
+			else store.unfold(b.id, "agent");
 			restored.push({ code, kind: b.kind, label: blockLabel(b) });
+			hit = true;
 		}
+		if (!hit) missing.push(code);
 	}
 	return { restored, missing };
 }

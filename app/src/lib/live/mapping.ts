@@ -16,7 +16,7 @@
  * Fallback (missing anchor): `m<i>:u`, `m<i>:p<j>`, `m<i>:r`, `m<i>:s` (position-based,
  * same as the old scheme) — so nothing crashes on malformed messages.
  */
-import type { WireBlock, FoldOp } from "./protocol";
+import type { WireBlock, FoldOp, GroupOp } from "./protocol";
 import type { Block } from "../engine/types";
 import { estTokens, BLOCK_OVERHEAD } from "../engine/tokens";
 
@@ -197,68 +197,205 @@ export function wireToBlock(w: WireBlock): Block {
  */
 export const PROTECT_RECENT_MSGS = 2;
 
+/** The durable block ids a single message emits + its tool-pair callIds (mirrors `linearize`). */
+interface MsgInfo {
+	ids: string[];
+	calls: string[]; // callIds of this message's tool_call parts
+	results: string[]; // callId of this message, if it is a tool_result
+	hasNonDurable: boolean; // any emitted id is positional → message is never group-removable
+}
+function messageInfo(m: PiMessage, i: number): MsgInfo {
+	const ids: string[] = [];
+	const calls: string[] = [];
+	const results: string[] = [];
+	let hasNonDurable = false;
+	const push = (id: string) => {
+		ids.push(id);
+		if (!isDurableId(id)) hasNonDurable = true;
+	};
+	switch (m.role) {
+		case "user":
+			push(blockId(m, i));
+			break;
+		case "assistant": {
+			const parts = Array.isArray(m.content) ? (m.content as PiPart[]) : [];
+			parts.forEach((b, j) => {
+				// Mirror linearize: empty non-result parts are not emitted, so they are not members.
+				if (b?.type === "thinking") {
+					if ((b as PiThinkingPart).thinking) push(blockId(m, i, j));
+				} else if (b?.type === "text") {
+					if ((b as PiTextPart).text) push(blockId(m, i, j));
+				} else if (b?.type === "toolCall") {
+					push(blockId(m, i, j));
+					const id = (b as PiToolCallPart).id;
+					if (id) calls.push(id);
+				}
+			});
+			break;
+		}
+		case "toolResult":
+			push(blockId(m, i));
+			if (m.toolCallId) results.push(m.toolCallId);
+			break;
+		default:
+			if (typeof m.summary === "string" && m.summary) push(blockId(m, i));
+	}
+	return { ids, calls, results, hasNonDurable };
+}
+
+/** Apply one message's in-place FoldOps (the original substitution path). Returns the same
+ *  message by reference when nothing folds; clones lazily otherwise. `mark()` flags a change. */
+function foldOne(m: PiMessage, i: number, byId: Map<string, FoldOp>, protectFrom: number, mark: () => void): PiMessage {
+	if (i >= protectFrom) return m; // backstop: never fold the most-recent messages
+	if (m.role === "assistant" && Array.isArray(m.content)) {
+		let parts: PiPart[] | null = null; // lazily cloned only if we actually fold
+		(m.content as PiPart[]).forEach((b, j) => {
+			const op = byId.get(blockId(m, i, j));
+			if (!op || !op.digestText) return;
+			if (b?.type === "text") {
+				parts ??= (m.content as PiPart[]).slice();
+				parts[j] = { ...(b as PiTextPart), text: op.digestText };
+			} else if (b?.type === "thinking") {
+				parts ??= (m.content as PiPart[]).slice();
+				parts[j] = { ...(b as PiThinkingPart), thinking: op.digestText };
+			}
+			// tool_call or any other kind → ignored (never fold / id mis-map)
+		});
+		if (parts) {
+			mark();
+			return { ...m, content: parts };
+		}
+		return m;
+	}
+	if (m.role === "toolResult") {
+		const op = byId.get(blockId(m, i));
+		if (op && op.digestText) {
+			mark();
+			return { ...m, content: [{ type: "text", text: op.digestText }] };
+		}
+		return m;
+	}
+	return m; // user / other: never folded
+}
+
 /**
  * Apply a fold plan to pi's messages and return a NEW array (touched messages are
  * cloned; untouched ones are passed through by reference). Pure: the caller's array
- * is never mutated, so correctness never depends on pi's copy semantics. Provider-
- * safety rules, each defended by an explicit kind check so a mis-mapped id can never
- * fold the wrong part:
- *   • tool_result → replace content with one text part; keep toolCallId/toolName/isError
- *   • text        → replace the part's text with the (non-empty) digest
- *   • thinking    → replace the part's thinking with the digest (never drop → never empties a message)
- *   • tool_call   → NEVER folded (removing/altering it orphans its result → provider 400)
- *   • user / other→ NEVER folded
- * An op whose id resolves to a missing part, or to a part of the wrong kind, is
- * ignored — never applied blindly.
+ * is never mutated, so correctness never depends on pi's copy semantics.
+ *
+ * Two kinds of op:
+ *
+ *   • `FoldOp` — IN-PLACE content substitution (ADR 0001–0005), each defended by a kind
+ *     check so a mis-mapped id can never fold the wrong part:
+ *       tool_result → one text part (keep toolCallId/toolName/isError) · text/thinking →
+ *       the (non-empty) digest · tool_call → NEVER (orphans its result) · user/other → NEVER.
+ *
+ *   • `GroupOp` — RANGE COLLAPSE (ADR 0006): remove a contiguous run of WHOLE messages and
+ *     insert ONE synthetic summary message. The ONLY op that changes the message count.
+ *     Three independent guards, re-derived here (never trusting the GUI):
+ *       1. whole + durable — a message is removable only if EVERY block it emits is durable
+ *          and a member of one group (a partially-covered or positional-id message stays);
+ *       2. balanced pairs — a removed tool_call must have its tool_result removed too, to a
+ *          fixpoint; an unbalanced message is demoted to stay-live (the straggler);
+ *       3. recent backstop — the newest PROTECT_RECENT_MSGS messages are never removed.
+ *     Each maximal run of same-group removable messages becomes one message (role = the
+ *     run's first message's role, mapped to user/assistant; content = the summary text).
+ *
+ * On ANY doubt a message passes through untouched; the output is never structurally invalid
+ * (no orphaned tool pair, no emptied message). Safe because this output feeds the model only
+ * — the GUI's block sync/cursor run off the un-collapsed `linearize`, so removals never
+ * desync the view (ADR 0006 §4).
  */
-export function applyPlan(messages: PiMessage[], ops: FoldOp[]): PiMessage[] {
-	if (!ops.length) return messages;
-	// Defense in depth (matches the GUI's `computeFoldOps`): refuse any op whose id is
-	// NOT durable, or whose digest is empty. A positional/fallback id is not stable
-	// across array shifts and could resolve to the wrong block; an empty digest would
-	// blank a content part. Both sides enforce this so neither alone is a single point
-	// of failure.
-	const safe = ops.filter((o) => isDurableId(o.id) && o.digestText);
-	if (!safe.length) return messages;
-	const byId = new Map(safe.map((o) => [o.id, o] as const));
-	const protectFrom = messages.length - PROTECT_RECENT_MSGS;
-	let changed = false;
+export function applyPlan(messages: PiMessage[], ops: FoldOp[], groups: GroupOp[] = []): PiMessage[] {
+	// Defense in depth (matches the GUI's `computeFoldOps`/`computeGroupOps`): refuse any op
+	// whose id is NOT durable or whose digest is empty, and any group with no summary/members.
+	// This is the shared safety boundary on the path that feeds the real model, so it cannot
+	// trust the peer's SHAPE, not just its values: a null op, a non-string id, or a non-string
+	// member would otherwise throw inside the `context` hook (e.g. `isDurableId(null)`) and
+	// defeat the passthrough guarantee. Re-derive every guard defensively and drop anything off.
+	const safeOps = (ops ?? []).filter((o) => o && typeof o.id === "string" && isDurableId(o.id) && typeof o.digestText === "string" && o.digestText);
+	// summaryText must be a NON-EMPTY string and every member id a string (a number/object/
+	// whitespace value would emit a provider-invalid text part or throw downstream).
+	const safeGroups = (groups ?? []).filter(
+		(g) =>
+			g &&
+			typeof g.summaryText === "string" &&
+			g.summaryText.trim() &&
+			Array.isArray(g.memberIds) &&
+			g.memberIds.length &&
+			g.memberIds.every((m) => typeof m === "string"),
+	);
+	if (!safeOps.length && !safeGroups.length) return messages;
 
-	const out = messages.map((m, i) => {
-		if (i >= protectFrom) return m; // backstop: never fold the most-recent messages
+	const protectFrom = Math.max(0, messages.length - PROTECT_RECENT_MSGS);
+	const byId = new Map(safeOps.map((o) => [o.id, o] as const));
 
-		if (m.role === "assistant" && Array.isArray(m.content)) {
-			let parts: PiPart[] | null = null; // lazily cloned only if we actually fold
-			(m.content as PiPart[]).forEach((b, j) => {
-				const op = byId.get(blockId(m, i, j));
-				if (!op || !op.digestText) return;
-				if (b?.type === "text") {
-					parts ??= (m.content as PiPart[]).slice();
-					parts[j] = { ...(b as PiTextPart), text: op.digestText };
-				} else if (b?.type === "thinking") {
-					parts ??= (m.content as PiPart[]).slice();
-					parts[j] = { ...(b as PiThinkingPart), thinking: op.digestText };
+	// ── Phase A: decide which whole messages each group may remove ───────────────
+	const owner: (GroupOp | null)[] = new Array(messages.length).fill(null);
+	if (safeGroups.length) {
+		const memberToGroup = new Map<string, GroupOp>();
+		for (const g of safeGroups) for (const id of g.memberIds) if (isDurableId(id)) memberToGroup.set(id, g);
+		const infos = messages.map((m, i) => messageInfo(m, i));
+		// Initial: a message older than the backstop, all of whose emitted ids are durable
+		// and members of ONE group.
+		for (let i = 0; i < messages.length; i++) {
+			if (i >= protectFrom) continue;
+			const info = infos[i];
+			if (!info.ids.length || info.hasNonDurable) continue;
+			let g: GroupOp | null = null;
+			let ok = true;
+			for (const id of info.ids) {
+				const gg = memberToGroup.get(id);
+				if (!gg || (g && gg !== g)) {
+					ok = false;
+					break;
 				}
-				// tool_call or any other kind → ignored (never fold / id mis-map)
-			});
-			if (parts) {
-				changed = true;
-				return { ...m, content: parts };
+				g = gg;
 			}
-			return m;
+			if (ok && g) owner[i] = g;
 		}
-
-		if (m.role === "toolResult") {
-			const op = byId.get(blockId(m, i));
-			if (op && op.digestText) {
-				changed = true;
-				return { ...m, content: [{ type: "text", text: op.digestText }] };
+		// Fixpoint: keep a removal only if its tool pairs are fully inside the removal set.
+		for (let changedSet = true; changedSet; ) {
+			changedSet = false;
+			const calls = new Set<string>();
+			const results = new Set<string>();
+			for (let i = 0; i < messages.length; i++) {
+				if (!owner[i]) continue;
+				for (const c of infos[i].calls) calls.add(c);
+				for (const c of infos[i].results) results.add(c);
 			}
-			return m;
+			for (let i = 0; i < messages.length; i++) {
+				if (!owner[i]) continue;
+				const info = infos[i];
+				if (info.calls.some((c) => !results.has(c)) || info.results.some((c) => !calls.has(c))) {
+					owner[i] = null; // straggler: a tool-pair half is outside → keep this message live
+					changedSet = true;
+				}
+			}
 		}
+	}
 
-		return m; // user / other: never folded
-	});
-
+	// ── Phase B: build the output — collapse runs, fold survivors in place ────────
+	let changed = false;
+	const mark = () => {
+		changed = true;
+	};
+	const out: PiMessage[] = [];
+	for (let i = 0; i < messages.length; ) {
+		const g = owner[i];
+		if (g) {
+			// Consume the maximal consecutive run owned by the SAME group → one entry. A
+			// group split by an interior straggler yields one entry per run (same summary).
+			const role = messages[i].role === "assistant" ? "assistant" : "user";
+			let j = i + 1;
+			while (j < messages.length && owner[j] === g) j++;
+			out.push({ role, content: [{ type: "text", text: g.summaryText }] } as PiMessage);
+			changed = true;
+			i = j;
+			continue;
+		}
+		out.push(foldOne(messages[i], i, byId, protectFrom, mark));
+		i++;
+	}
 	return changed ? out : messages;
 }
