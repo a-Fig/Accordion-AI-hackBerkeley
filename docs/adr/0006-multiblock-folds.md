@@ -164,12 +164,27 @@ never force; it can only unfold a group that is actually folded.
 ## Watch items
 
 - **#1 — live-provider acceptance (UNVERIFIED HERE).** The restructured array (messages
-  removed, one synthetic summary inserted, role = first-removed role) is proven balanced and
-  non-empty by unit tests, but was NOT validated against a real model call in this
-  environment. Verify a live armed group-collapse round-trips 200 before relying on it.
-  Synthetic-message role rhythm (a removed `user` turn can create assistant/assistant
-  adjacency) is the most likely rough edge; pi normalization is expected to coalesce, but
-  confirm. The in-place fallback (§4) is the escape hatch.
+  removed, one synthetic summary inserted, role = first-removed role mapped to user/assistant)
+  is proven balanced and non-empty by unit tests, but was NOT validated against a real model
+  call in this environment. Verify a live armed group-collapse round-trips 200 before relying
+  on it. **Synthetic-message role rhythm is the most likely rough edge:** a removed `user`
+  turn can create assistant/assistant adjacency, and a run whose first removed message is a
+  `tool_result` (or a straggler-split sub-run) becomes a `user`-role summary — which can
+  create user/user adjacency. pi normalization is expected to coalesce consecutive same-role
+  messages, but confirm; if not, the candidate fix is to map `tool_result`/summary-first runs
+  to `assistant`, or fall back to the in-place mechanism (§4).
+- **Cross-group split tool-pair (accounting only, not safety).** If two SEPARATE adjacent
+  groups split one tool pair (call in group A, result in group B), the wire correctly removes
+  BOTH halves (balanced), but the GUI's `classifyGroup` pairs only within a single group, so
+  it marks each half a "straggler" — `savedTokens` understates and the tooltip's "N kept live"
+  over-reports. The model array stays valid; only the GUI's numbers drift. Fix later by either
+  refusing a range that splits a pair already half-grouped, or making classification
+  cross-group-aware. (Single-group split pairs — the common case — are exact.)
+- **Wire recap describes the GUI's collapsed set.** `summaryText` is built from the engine's
+  `classifyGroup`; when the extension's independent re-derivation removes a slightly different
+  set (the cross-group case above, or a durability mismatch), the recap text counts/names
+  blocks that differ from what was physically removed. The `{#code FOLDED}` tag/code is still
+  correct for unfolding; only the prose is approximate.
 - **Protect-tail grows into a group.** Widening `protectTokens` so the tail overlaps an
   existing group must spring the overlap live; groups dissolve/clamp rather than collapsing
   protected content (handled like the existing fold self-heal in `refold`).

@@ -257,14 +257,19 @@
 	});
 	const rangeCount = $derived(rangeSet.size);
 
+	// Brief inline hint when a Group attempt is rejected (overlap / protected tail / <2).
+	let groupErr = $state(false);
 	function clearRange() {
 		rangeAnchorId = null;
 		rangeEndId = null;
+		groupErr = false;
 	}
 	function handleCreateGroup() {
 		if (!rangeAnchorId || !rangeEndId) return;
-		store.createGroup(rangeAnchorId, rangeEndId);
-		clearRange();
+		const g = store.createGroup(rangeAnchorId, rangeEndId);
+		// Only clear on success; on failure keep the selection and say why (no silent drop).
+		if (g) clearRange();
+		else groupErr = true;
 	}
 
 	// ---- selected group (for the fan-out overlay) ---------------------------
@@ -314,9 +319,11 @@
 
 		const gid = findGroupId(e);
 		if (gid) {
-			// Click on a folded group tile → select it and open the fan-out overlay.
+			// A FOLDED group tile → open the fan-out overlay. An OPEN group's dull parent has
+			// its own band controls (Re-fold / Delete), so a single click there is a no-op.
+			const grp = store.groupById(gid);
 			const tileEl = (e.target as HTMLElement).closest<HTMLElement>("[data-group]");
-			if (tileEl) openGroupOverlay(gid, tileEl);
+			if (grp?.folded && tileEl) openGroupOverlay(gid, tileEl);
 			return;
 		}
 
@@ -326,6 +333,7 @@
 		if (e.shiftKey && rangeAnchorId) {
 			// Shift-click: extend the range to this block.
 			rangeEndId = id;
+			groupErr = false;
 			return;
 		}
 
@@ -333,6 +341,7 @@
 		onselect(id);
 		rangeAnchorId = id;
 		rangeEndId = null;
+		groupErr = false;
 	}
 
 	function onDbl(e: MouseEvent) {
@@ -405,6 +414,7 @@
 			{#if rangeCount >= 2}
 				<span class="range-bar">
 					<button class="group-btn" onclick={handleCreateGroup}>Group {rangeCount} blocks</button>
+					{#if groupErr}<span class="range-err">can’t group — overlaps a group or the protected tail</span>{/if}
 					<button class="range-clear" onclick={clearRange} title="Clear selection">✕</button>
 				</span>
 			{:else if rangeAnchorId}
@@ -725,6 +735,11 @@
 	}
 	.range-hint {
 		font-size: 10px;
+	}
+	.range-err {
+		font-size: 10px;
+		color: var(--danger, #f87171);
+		white-space: nowrap;
 	}
 
 	/* ---- stage ---- */
