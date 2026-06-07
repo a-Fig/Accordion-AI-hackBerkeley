@@ -261,7 +261,28 @@ export class AccordionStore {
 	 * Recompute every auto-controlled block from scratch so the live context fits
 	 * the budget. Idempotent: same blocks + budget + overrides → same result.
 	 */
+	/**
+	 * Dissolve any group that has come to reach into the protected tail (ADR 0006 watch
+	 * item). Groups are created entirely older than the tail, but widening `protectTokens`
+	 * can later grow the tail over an existing group. Protection is absolute, so rather than
+	 * collapse protected content we drop the whole group — keeping the grid (older box uses
+	 * the display list, protected box renders raw tiles) and the accounting consistent.
+	 */
+	private pruneProtectedGroups(): void {
+		if (!this.groups.length) return;
+		const pf = this.protectedFromIndex;
+		const kept = this.groups.filter((g) => {
+			const reaches = g.memberIds.some((id) => (this.index.get(id) ?? Infinity) >= pf);
+			if (reaches) this.emit("auto", "ungrouped (protected)", `${g.memberIds.length} blocks`);
+			return !reaches;
+		});
+		if (kept.length !== this.groups.length) this.groups = kept;
+	}
+
 	refold(): void {
+		// A group can never overlap the protected tail; drop any that now does (e.g. the
+		// tail was widened over it) before anything reads group state this pass.
+		this.pruneProtectedGroups();
 		// Compute the protected boundary once; folding never changes a block's full
 		// `tokens`, so this index is stable for the whole pass.
 		const protectedFrom = this.protectedFromIndex;

@@ -134,4 +134,17 @@ describe("group fold/unfold/delete lifecycle", () => {
 		expect(s.groupOf(s.get("r:c1")!)).toBeUndefined();
 		expect(s.liveTokens).toBe(full);
 	});
+
+	it("dissolves a group if the protected tail later grows over it (ADR 0006 watch item)", () => {
+		const s = makeStore();
+		const full = s.liveTokens;
+		s.createGroup("a:r1:p0", "r:c1");
+		expect(s.groups.length).toBe(1);
+		expect(s.liveTokens).toBeLessThan(full);
+		// Widen the protected tail past the whole session → the group is now protected.
+		s.setProtect(1_000_000);
+		expect(s.protectedFromIndex).toBe(0); // everything protected
+		expect(s.groups.length).toBe(0); // group dissolved, not silently collapsing protected content
+		expect(s.liveTokens).toBe(full); // accounting restored
+	});
 });
