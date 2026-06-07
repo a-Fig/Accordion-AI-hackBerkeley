@@ -62,7 +62,7 @@ export default function accordionLive(pi: ExtensionAPI): void {
 	let wss: WebSocketServer | null = null;
 	let client: WebSocket | null = null; // the GUI (one driver at a time in M1)
 	let sessionId = "";
-	let meta = { title: "pi session", cwd: "", model: "", format: "pi" as const };
+	let meta = { title: "pi session", cwd: "", model: "", contextWindow: null as number | null, format: "pi" as const };
 
 	let sentCount = 0; // blocks already streamed to the current client
 	let reqSeq = 0;
@@ -225,12 +225,18 @@ export default function accordionLive(pi: ExtensionAPI): void {
 			if (m?.id) {
 				model = m.id;
 				meta.model = m.id;
-				if (typeof m.contextWindow === "number") contextWindow = m.contextWindow;
+				if (typeof m.contextWindow === "number") {
+					contextWindow = m.contextWindow;
+					meta.contextWindow = m.contextWindow;
+				}
 			}
 			const u = ctx.getContextUsage?.();
 			if (u) {
 				tokens = u.tokens;
-				if (typeof u.contextWindow === "number") contextWindow = u.contextWindow;
+				if (typeof u.contextWindow === "number") {
+					contextWindow = u.contextWindow;
+					meta.contextWindow = u.contextWindow;
+				}
 			}
 		} catch {
 			/* optional APIs */
@@ -282,7 +288,7 @@ export default function accordionLive(pi: ExtensionAPI): void {
 			// agent_end/message_end paths) we do NOT await or apply a plan here.
 			const backlog = linearize(lastMessages);
 			if (backlog.length) {
-				send(ws, { type: "sync", reqId: ++reqSeq, full: true, blocks: backlog });
+				send(ws, { type: "sync", reqId: ++reqSeq, full: true, blocks: backlog, contextWindow });
 				sentCount = backlog.length; // cursor now matches what the GUI holds
 			}
 			ws.on("message", (data: Buffer) => {
@@ -338,7 +344,7 @@ export default function accordionLive(pi: ExtensionAPI): void {
 				clearTimeout(timer);
 				resolve(ops);
 			});
-			send(ws, { type: "sync", reqId, full, blocks });
+			send(ws, { type: "sync", reqId, full, blocks, contextWindow });
 		});
 	}
 

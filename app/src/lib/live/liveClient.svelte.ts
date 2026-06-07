@@ -20,6 +20,9 @@ import { ghostStart, ghostEnd, ghostClearAll } from "./ghostState.svelte";
 
 let socket: WebSocket | null = null;
 let manualClose = false;
+// True once budget has been set from pi's contextWindow for the current connection.
+// Prevents subsequent syncs from overriding a user's manual budget adjustment.
+let budgetLive = false;
 
 /** Live connection status, for the UI. */
 export const live = $state<{ status: "idle" | "connecting" | "connected" | "error"; detail: string }>({
@@ -90,23 +93,46 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 				folding.enabled = false;
 			// Structural reset: clear all ghosts — no ghost survives a session reconnect.
 			ghostClearAll();
+			budgetLive = false;
 			session.store = new AccordionStore({
 				meta: { format: "pi", title: msg.meta.title || "live pi session", cwd: msg.meta.cwd || "", model: msg.meta.model || "" },
 				blocks: [],
 				lineCount: 0,
 				skipped: 0,
 			});
+			if (typeof msg.meta.contextWindow === "number" && msg.meta.contextWindow > 0) {
+				session.store.setContextWindow(msg.meta.contextWindow);
+				session.store.setBudget(msg.meta.contextWindow);
+				budgetLive = true;
+			}
 		} else if (msg.type === "sync") {
 			if (!session.store) return;
 			if (msg.full) {
 				// structural reset — rebuild from scratch; clear all ghosts.
 				ghostClearAll();
+				const prevContextWindow = session.store.contextWindow;
+				const prevBudget = session.store.budget;
+				const prevProtect = session.store.protectTokens;
 				session.store = new AccordionStore({
 					meta: session.store.meta,
 					blocks: [],
 					lineCount: 0,
 					skipped: 0,
 				});
+				// Carry forward contextWindow, user-adjusted budget, and protect-tail across resets.
+				if (prevContextWindow !== null) session.store.setContextWindow(prevContextWindow);
+				session.store.setBudget(prevBudget);
+				session.store.setProtect(prevProtect);
+			}
+			// Update contextWindow from the sync (refreshed each context hook). Apply to
+			// budget automatically the first time we learn it (before the user can adjust).
+			const cw = msg.contextWindow;
+			if (typeof cw === "number" && cw > 0) {
+				session.store.setContextWindow(cw);
+				if (!budgetLive) {
+					session.store.setBudget(cw);
+					budgetLive = true;
+				}
 			}
 			// Committed blocks arrive HERE (the appendBlocks path), NEVER from ghost state.
 			// Invariant: a ghost is only removed, never converted to a block.
@@ -190,6 +216,7 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 
 export function disconnectLive(): void {
 	manualClose = true;
+	budgetLive = false;
 	session.live = false;
 	// Guaranteed teardown (invariant #2): explicit disconnect clears all ghosts
 	// immediately, before the socket close fires.

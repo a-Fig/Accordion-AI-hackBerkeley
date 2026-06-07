@@ -35,6 +35,8 @@ export class AccordionStore {
 	blocks = $state<Block[]>([]);
 	/** Token budget for the live context window. */
 	budget = $state(70_000);
+	/** Model's total context window, as reported by pi (null until known). */
+	contextWindow = $state<number | null>(null);
 	/**
 	 * The protected working tail: the most recent blocks whose combined full size
 	 * reaches this many tokens are NEVER auto-folded. The automatic folder and the
@@ -190,6 +192,10 @@ export class AccordionStore {
 	setBudget(n: number): void {
 		this.budget = Math.max(1000, Math.round(n));
 		this.refold();
+	}
+
+	setContextWindow(n: number): void {
+		this.contextWindow = n;
 	}
 
 	/**

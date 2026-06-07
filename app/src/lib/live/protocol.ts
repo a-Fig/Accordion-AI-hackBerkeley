@@ -85,19 +85,21 @@ export interface HelloMessage {
 	type: "hello";
 	protocolVersion: number;
 	sessionId: string;
-	meta: { title: string; cwd: string; model: string; format: "pi" };
+	meta: { title: string; cwd: string; model: string; contextWindow: number | null; format: "pi" };
 }
 
 /**
  * Sent on every `context` hook. `blocks` are the blocks ADDED since the previous
  * sync (the whole context when `full` is true — i.e. the first sync, or after a
- * structural reset). `reqId` correlates the GUI's `plan` reply.
+ * structural reset). `reqId` correlates the GUI's `plan` reply. `contextWindow`
+ * is the model's total token capacity (best-effort; absent from old extensions).
  */
 export interface SyncMessage {
 	type: "sync";
 	reqId: number;
 	full: boolean;
 	blocks: WireBlock[];
+	contextWindow?: number | null;
 }
 
 /**

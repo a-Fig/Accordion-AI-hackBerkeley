@@ -83,7 +83,7 @@
 				<input
 					type="range"
 					min="12000"
-					max="160000"
+					max={Math.max(store.contextWindow ?? 200_000, store.budget, 200_000)}
 					step="2000"
 					value={store.budget}
 					oninput={(e) => store.setBudget(+e.currentTarget.value)}
