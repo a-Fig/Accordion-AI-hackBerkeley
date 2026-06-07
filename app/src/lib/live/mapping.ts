@@ -309,12 +309,21 @@ function foldOne(m: PiMessage, i: number, byId: Map<string, FoldOp>, protectFrom
 export function applyPlan(messages: PiMessage[], ops: FoldOp[], groups: GroupOp[] = []): PiMessage[] {
 	// Defense in depth (matches the GUI's `computeFoldOps`/`computeGroupOps`): refuse any op
 	// whose id is NOT durable or whose digest is empty, and any group with no summary/members.
-	const safeOps = ops.filter((o) => isDurableId(o.id) && o.digestText);
-	// summaryText must be a NON-EMPTY string: a number/object/whitespace value would emit a
-	// provider-invalid text part. This is the shared safety boundary, so it cannot trust the
-	// peer's field types (the GUI always sends a tagged string; a buggy/old peer might not).
+	// This is the shared safety boundary on the path that feeds the real model, so it cannot
+	// trust the peer's SHAPE, not just its values: a null op, a non-string id, or a non-string
+	// member would otherwise throw inside the `context` hook (e.g. `isDurableId(null)`) and
+	// defeat the passthrough guarantee. Re-derive every guard defensively and drop anything off.
+	const safeOps = (ops ?? []).filter((o) => o && typeof o.id === "string" && isDurableId(o.id) && typeof o.digestText === "string" && o.digestText);
+	// summaryText must be a NON-EMPTY string and every member id a string (a number/object/
+	// whitespace value would emit a provider-invalid text part or throw downstream).
 	const safeGroups = (groups ?? []).filter(
-		(g) => g && typeof g.summaryText === "string" && g.summaryText.trim() && Array.isArray(g.memberIds) && g.memberIds.length,
+		(g) =>
+			g &&
+			typeof g.summaryText === "string" &&
+			g.summaryText.trim() &&
+			Array.isArray(g.memberIds) &&
+			g.memberIds.length &&
+			g.memberIds.every((m) => typeof m === "string"),
 	);
 	if (!safeOps.length && !safeGroups.length) return messages;
 

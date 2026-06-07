@@ -135,6 +135,36 @@ describe("applyPlan — group collapse", () => {
 		expect(applyPlan(src, [], [{ id: "g:x", memberIds: ["u:1000"], summaryText: {} as unknown as string }])).toBe(src);
 	});
 
+	it("never throws on malformed peer input — null/typed-wrong ops or member ids ⇒ passthrough", () => {
+		// applyPlan is the shared safety boundary on the model-call path: a null op or a
+		// non-string id must be DROPPED, not throw inside the context hook (e.g. isDurableId(null)).
+		const src = msgs();
+		expect(applyPlan(src, [null as unknown as FoldOp, 42 as unknown as FoldOp, { id: 7 as unknown as string, digestText: "x" }], [])).toBe(src);
+		expect(applyPlan(src, [], [{ id: "g:x", memberIds: [null as unknown as string, 5 as unknown as string], summaryText: "{#g FOLDED} x" }])).toBe(src);
+	});
+
+	it("first-collapsed and all-non-protected-collapsed stay balanced, non-empty, valid-role", () => {
+		const validRole = (r: string) => r === "user" || r === "assistant" || r === "toolResult";
+		const nonEmpty = (m: PiMessage) => (typeof m.content === "string" ? m.content.length > 0 : Array.isArray(m.content) && m.content.length > 0);
+		// The very FIRST message (m0, a user turn) is inside the collapsed run.
+		let out = applyPlan(msgs(), [], [G(["u:1000", "a:resp_a:p0", "a:resp_a:p1", "a:resp_a:p2", "r:call_1"], "{#a FOLDED} a")]);
+		expect(out.every((m) => validRole(m.role))).toBe(true);
+		expect(out.every(nonEmpty)).toBe(true);
+		expect(toolBalance(out).balanced).toBe(true);
+		// EVERY non-protected message (m0..m5) collapses into one entry; the backstop survives.
+		out = applyPlan(
+			msgs(),
+			[],
+			[G(["u:1000", "a:resp_a:p0", "a:resp_a:p1", "a:resp_a:p2", "r:call_1", "u:2000", "a:resp_b:p0", "a:resp_b:p1", "r:call_2"], "{#all FOLDED} everything")],
+		);
+		expect(out.every((m) => validRole(m.role))).toBe(true);
+		expect(out.every(nonEmpty)).toBe(true);
+		expect(toolBalance(out).balanced).toBe(true);
+		expect(hasText(out, "thanks")).toBe(true); // m6 (protected) untouched
+		// NOTE: role rhythm (same-role adjacency, e.g. summary-user next to protected-user m6) is
+		// structurally valid here but its provider acceptance is ADR 0006 watch item #1 (verify live).
+	});
+
 	it("balanced-in ⇒ balanced-out, no emptied message, for EVERY contiguous range (provider-safety property)", () => {
 		// Brute-force every contiguous message range over the non-protected region (m0..m5).
 		// The output must NEVER orphan a tool pair or emit an empty message, whatever is grouped.

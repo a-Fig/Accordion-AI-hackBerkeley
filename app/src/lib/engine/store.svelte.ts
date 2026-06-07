@@ -15,15 +15,27 @@ import type { Block, BlockKind, Actor, SessionMeta, ParsedSession, Group } from 
 import { digest, digestTokens, groupDigest, groupDigestTokens } from "./digest";
 
 /**
- * The "message key" of a block id — the id with any trailing `:p<n>` part suffix
- * removed, so every part of one assistant message shares a key (`a:resp:p0`,
- * `a:resp:p1` → `a:resp`) while a user/result/summary block is its own key. Group
- * creation snaps to whole messages on this key so a group never collapses a message's
- * parts in half (ADR 0006 §2/§4) — which makes GUI accounting message-exact.
+ * The "message key" of a block id — the id with its assistant-part suffix removed, so
+ * every part of one assistant message shares a key while a user/result/summary block is
+ * its own key. Group creation snaps to whole messages on this key so a group never
+ * collapses a message's parts in half (ADR 0006 §2/§4) — making GUI accounting message-exact.
+ *
+ * Two id regimes share this store, and both must collapse to the message:
+ *  • LIVE wire (`live/mapping.ts`): assistant part = `a:<anchor>:p<j>` / `m<i>:p<j>` — the
+ *    `p` prefix on the index disambiguates it.
+ *  • LOADED / demo (`engine/parse.ts`): assistant part = `<eid>:<j>` — a BARE numeric index,
+ *    no `p`. We must strip that too, or every part of a loaded assistant message snaps to its
+ *    own key and the whole-message invariant silently degrades to per-part (breaks the Demo
+ *    session). The catch: live SCALAR durable ids `u:<ts>` / `s:<ts>` / `r:<numericCallId>`
+ *    also end in `:<digits>` and are each their OWN message — never strip those (a single
+ *    lowercase type-letter + colon + digits is the tell).
  */
 function messageKey(id: string): string {
-	const m = id.match(/^(.*):p(?:\d+|\?)$/);
-	return m ? m[1] : id;
+	const live = id.match(/^(.*):p(?:\d+|\?)$/);
+	if (live) return live[1];
+	const parsed = id.match(/^(.+):\d+$/);
+	if (parsed && !/^[a-z]:\d+$/.test(id)) return parsed[1];
+	return id;
 }
 
 /** Classification of a folded group's members for accounting + the wire (ADR 0006 §4/§5). */
@@ -142,7 +154,11 @@ export class AccordionStore {
 	});
 	pinnedCount = $derived.by(() => {
 		let n = 0;
-		for (const b of this.blocks) if (b.override === "pinned") n++;
+		// A block pinned BEFORE it was grouped keeps its "pinned" override (members keep their
+		// override, ADR §2), but a folded group collapses it on the wire — so it reads folded.
+		// Don't count it as pinned, or the header contradicts what the user sees (a collapsed
+		// tile reported as pinned).
+		for (const b of this.blocks) if (b.override === "pinned" && !this.groupWire.get(b.id)?.collapsed) n++;
 		return n;
 	});
 	overBudget = $derived.by(() => this.liveTokens > this.budget);
@@ -428,7 +444,7 @@ export class AccordionStore {
 	/** Hand a block back to the automatic folder. */
 	auto(id: string): void {
 		const b = this.get(id);
-		if (!b) return;
+		if (!b || this.inFoldedGroup(id)) return; // group controls collapsed members (like fold/pin)
 		b.override = null;
 		b.by = null;
 		this.refold();

@@ -251,7 +251,9 @@
 		const endIdx = store.blocks.findIndex((b) => b.id === rangeEndId);
 		if (anchorIdx === -1 || endIdx === -1) return new Set();
 		const lo = Math.min(anchorIdx, endIdx);
-		const hi = Math.max(anchorIdx, endIdx);
+		// Never highlight into the protected tail — a group can't reach it, so a range that
+		// visually spans both boxes would mislead the user into a guaranteed-to-fail "Group".
+		const hi = Math.min(Math.max(anchorIdx, endIdx), store.protectedFromIndex - 1);
 		const s = new Set<string>();
 		for (let i = lo; i <= hi; i++) s.add(store.blocks[i].id);
 		return s;
@@ -299,6 +301,9 @@
 	function closeOverlay() {
 		selectedGroupId = null;
 	}
+	// Single-click overlay open is deferred so a double-click (unfold) can cancel it (see onClick).
+	let groupClickTimer: ReturnType<typeof setTimeout> | undefined;
+	onDestroy(() => clearTimeout(groupClickTimer));
 	const overlayGroup = $derived(selectedGroupId ? store.groupById(selectedGroupId) : undefined);
 	const overlayMembers = $derived(overlayGroup ? store.groupMembers(overlayGroup) : []);
 
@@ -348,23 +353,35 @@
 			// its own band controls (Re-fold / Delete), so a single click there is a no-op.
 			const grp = store.groupById(gid);
 			const tileEl = (e.target as HTMLElement).closest<HTMLElement>("[data-group]");
-			if (grp?.folded && tileEl) openGroupOverlay(gid, tileEl);
+			if (grp?.folded && tileEl) {
+				// Defer the open so a DOUBLE-click (which unfolds the group) doesn't first flash
+				// the overlay on its two leading `click` events. onDbl cancels this timer.
+				clearTimeout(groupClickTimer);
+				groupClickTimer = setTimeout(() => openGroupOverlay(gid, tileEl), 200);
+			}
 			return;
 		}
 
 		const id = findId(e);
 		if (!id) return;
+		const bl = store.get(id);
 
 		if (e.shiftKey && rangeAnchorId) {
-			// Shift-click: extend the range to this block.
+			// Extend the range — but only to a groupable block. A protected-tail block, or one
+			// already in a group, can't complete a valid range; hint instead of a phantom span.
+			if (!bl || store.isProtected(bl) || store.groupOf(bl)) {
+				groupErr = true;
+				return;
+			}
 			rangeEndId = id;
 			groupErr = false;
 			return;
 		}
 
-		// Plain click on a block tile: inspect + set anchor.
+		// Plain click on a block tile: inspect, and anchor a range only if this block could
+		// actually start one (older + ungrouped) — otherwise leave no dangling anchor.
 		onselect(id);
-		rangeAnchorId = id;
+		rangeAnchorId = bl && !store.isProtected(bl) && !store.groupOf(bl) ? id : null;
 		rangeEndId = null;
 		groupErr = false;
 	}
@@ -372,6 +389,7 @@
 	function onDbl(e: MouseEvent) {
 		const gid = findGroupId(e);
 		if (gid) {
+			clearTimeout(groupClickTimer); // cancel the deferred single-click overlay
 			store.toggleGroup(gid);
 			closeOverlay();
 			return;
