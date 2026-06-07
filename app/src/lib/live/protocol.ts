@@ -26,7 +26,7 @@
  */
 
 /** Bump on any breaking change to the message shapes below. */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /**
  * Browser dev-loop fallback port only. In the desktop ("pull") model each pi
@@ -76,6 +76,27 @@ export interface WireBlock {
 export interface FoldOp {
 	id: string;
 	digestText: string;
+}
+
+/**
+ * One group-collapse instruction (ADR 0006) — the ONLY op that changes the message count
+ * (every `FoldOp` is in-place). It replaces the messages of a contiguous block range with
+ * ONE synthetic summary message. `memberIds` are the durable block ids the GUI deems safely
+ * collapsible (stragglers/protected already excluded); `summaryText` is the single entry's
+ * text, carrying the group's `{#<code> FOLDED}` tag where `code = foldCode(group.id)` — ONE
+ * handle for the whole range, so the agent restores it all with one `unfold` code.
+ *
+ * Provider safety lives on BOTH sides (defense in depth, like `FoldOp`): the extension's
+ * `applyPlan` re-derives tool-pair balance independently and only removes WHOLE, balanced,
+ * durable, non-backstop messages — on ANY doubt the affected messages pass through
+ * untouched. Safe because `applyPlan`'s output feeds the model only; the GUI's block sync
+ * and `sentCount` cursor run off the un-collapsed `linearize`, so a removal can never desync
+ * the view.
+ */
+export interface GroupOp {
+	id: string;
+	memberIds: string[];
+	summaryText: string;
 }
 
 // ── Server → client (extension → GUI) ────────────────────────────────────────
@@ -146,11 +167,13 @@ export type ServerMessage = HelloMessage | SyncMessage | StreamMessage | UnfoldR
 
 // ── Client → server (GUI → extension) ────────────────────────────────────────
 
-/** The GUI's reply to a `sync`. `ops: []` means "fold nothing". */
+/** The GUI's reply to a `sync`. `ops: []` (and no `groups`) means "fold nothing". */
 export interface PlanMessage {
 	type: "plan";
 	reqId: number;
 	ops: FoldOp[];
+	/** Group-collapse ops (ADR 0006). Optional/additive — omitted ⇒ no group collapse. */
+	groups?: GroupOp[];
 }
 
 /** Optional: the GUI announcing itself (reserved; unused in M1). */

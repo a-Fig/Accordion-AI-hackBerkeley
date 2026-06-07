@@ -143,7 +143,16 @@ await new Promise((resolve, reject) => {
 			seen.contextSync = true;
 			seen.contextBlocks = m.blocks.length;
 			// Use durable id (a:<responseId>:p0) — exercises the Phase-1 id path
-			ws.send(JSON.stringify({ type: "plan", reqId: m.reqId, ops: [{ id: "a:resp-abc:p0", digestText: "FOLDED" }] }));
+			// Also send a GROUP op (ADR 0006) collapsing m0 (user, durable u:<T0>, outside the
+			// 2-message backstop) into one summary entry — exercises range-collapse end to end.
+			ws.send(
+				JSON.stringify({
+					type: "plan",
+					reqId: m.reqId,
+					ops: [{ id: "a:resp-abc:p0", digestText: "FOLDED" }],
+					groups: [{ id: `g:u:${T0}`, memberIds: [`u:${T0}`], summaryText: "GROUPSUM" }],
+				}),
+			);
 			setTimeout(() => {
 				clearTimeout(timeout);
 				resolve();
@@ -822,6 +831,12 @@ else {
 	if (foldedText !== "FOLDED") fails.push(`a:resp-abc:p0 not folded — got ${JSON.stringify(foldedText)}`);
 	const protectedText = contextReturn.messages[3]?.content?.[0]?.text;
 	if (protectedText !== "second reply") fails.push("recent message was unexpectedly altered");
+	// Group collapse (ADR 0006): m0 (user "do the thing") was replaced by the one summary
+	// entry; the array stays length 4 (one removed, one inserted) so the indices above hold.
+	const groupText = contextReturn.messages[0]?.content?.[0]?.text;
+	if (groupText !== "GROUPSUM") fails.push(`group did not collapse m0 to its summary — got ${JSON.stringify(groupText)}`);
+	if (contextReturn.messages.some((mm) => mm?.content === "do the thing" || mm?.content?.[0]?.text === "do the thing"))
+		fails.push("collapsed user message still present in the model array");
 }
 
 // shutdown must stop advertising (delete the registry entry)
@@ -843,7 +858,7 @@ if (fails.length) {
 }
 console.log(
 	`SMOKE PASS — registry(port ${PORT}, model ✓, tokens ✓) ✓  no-GUI passthrough ✓  focus request ✓  ` +
-		`hello ✓  attach-flush(${seen.flushBlocks} blocks on connect) ✓  plan applied per-block ✓  backstop ✓  ` +
+		`hello ✓  attach-flush(${seen.flushBlocks} blocks on connect) ✓  plan applied per-block ✓  group collapse ✓  backstop ✓  ` +
 		`message_end committed-streaming ✓  model-swap window-push ✓  tool-loop (2 msgs/turn) ✓  no-dup after context ✓  ` +
 		`empty-leading-part dedup ✓  agent_end live-view ✓  shutdown cleanup ✓  ` +
 		`stream(start/end/abort) ✓  no-content-on-frame ✓  delta-dropped ✓  ` +

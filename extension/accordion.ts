@@ -36,7 +36,10 @@ import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@e
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 import { linearize, applyPlan, type PiMessage } from "../app/src/lib/live/mapping";
-import { DEFAULT_PORT, PROTOCOL_VERSION, type FoldOp, type ServerMessage, type StreamMessage, type UnfoldRequestMessage, type UnfoldResultMessage } from "../app/src/lib/live/protocol";
+import { DEFAULT_PORT, PROTOCOL_VERSION, type FoldOp, type GroupOp, type ServerMessage, type StreamMessage, type UnfoldRequestMessage, type UnfoldResultMessage } from "../app/src/lib/live/protocol";
+
+/** The GUI's reply to a sync: in-place fold ops + group-collapse ops (ADR 0006). */
+type Plan = { ops: FoldOp[]; groups: GroupOp[] };
 import {
 	REGISTRY_PROTOCOL,
 	REGISTRY_DIR,
@@ -67,7 +70,7 @@ export default function accordionLive(pi: ExtensionAPI): void {
 	let sentCount = 0; // blocks already streamed to the current client
 	let reqSeq = 0;
 	let epoch = 0; // bumped on every new GUI connection; invalidates in-flight requests
-	const pending = new Map<number, (ops: FoldOp[]) => void>();
+	const pending = new Map<number, (plan: Plan) => void>();
 	// Unfold requests: keyed by reqId, resolved when the GUI replies (or null on flush).
 	// Deliberately NOT reset on reconnect (unlike reqSeq): a late reply from a superseded
 	// GUI can never alias a fresh request's reqId, and flushPending() drains the map anyway.
@@ -103,7 +106,7 @@ export default function accordionLive(pi: ExtensionAPI): void {
 
 	/** Resolve every outstanding request as passthrough (used on connect-swap / shutdown). */
 	function flushPending(): void {
-		for (const resolve of pending.values()) resolve([]);
+		for (const resolve of pending.values()) resolve({ ops: [], groups: [] });
 		pending.clear();
 		// In-flight unfold requests (if any) must also be resolved. null signals "not
 		// attached" — the tool returns a safe "did not respond" message to the agent.
@@ -310,7 +313,7 @@ export default function accordionLive(pi: ExtensionAPI): void {
 					const resolve = pending.get(msg.reqId);
 					if (resolve) {
 						pending.delete(msg.reqId);
-						resolve(Array.isArray(msg.ops) ? msg.ops : []);
+						resolve({ ops: Array.isArray(msg.ops) ? msg.ops : [], groups: Array.isArray(msg.groups) ? msg.groups : [] });
 					}
 				}
 				if (msg?.type === "unfoldResult" && typeof msg.reqId === "number") {
@@ -336,20 +339,20 @@ export default function accordionLive(pi: ExtensionAPI): void {
 		});
 	}
 
-	/** Send a sync and await the GUI's plan; resolves [] on timeout, null if unsent. */
-	function requestPlan(reqId: number, full: boolean, blocks: ReturnType<typeof linearize>): Promise<FoldOp[] | null> {
+	/** Send a sync and await the GUI's plan; resolves an empty plan on timeout, null if unsent. */
+	function requestPlan(reqId: number, full: boolean, blocks: ReturnType<typeof linearize>): Promise<Plan | null> {
 		return new Promise((resolve) => {
 			const ws = client;
 			if (!ws || ws.readyState !== 1) return resolve(null);
 			const timer = setTimeout(() => {
 				if (pending.has(reqId)) {
 					pending.delete(reqId);
-					resolve([]); // delivered but no reply in time → passthrough
+					resolve({ ops: [], groups: [] }); // delivered but no reply in time → passthrough
 				}
 			}, REQUEST_TIMEOUT_MS);
-			pending.set(reqId, (ops) => {
+			pending.set(reqId, (plan) => {
 				clearTimeout(timer);
-				resolve(ops);
+				resolve(plan);
 			});
 			send(ws, { type: "sync", reqId, full, blocks, contextWindow });
 		});
@@ -471,13 +474,13 @@ export default function accordionLive(pi: ExtensionAPI): void {
 		const fresh = all.slice(sentCount);
 		const reqId = ++reqSeq;
 		const full = sentCount === 0;
-		const ops = await requestPlan(reqId, full, fresh);
-		if (ops === null) return; // couldn't deliver → pass through, don't advance
+		const plan = await requestPlan(reqId, full, fresh);
+		if (plan === null) return; // couldn't deliver → pass through, don't advance
 		if (epoch !== myEpoch) return; // GUI reconnected mid-flight → don't apply/advance
 		sentCount = Math.max(sentCount, all.length); // advance cursor; never rewind (a message_end during the await may have advanced it further)
-		if (ops.length === 0) return; // empty plan (Milestone 1) → pass through
+		if (plan.ops.length === 0 && plan.groups.length === 0) return; // empty plan → pass through
 
-		return { messages: applyPlan(event.messages as unknown as PiMessage[], ops) as unknown as AgentMessage[] };
+		return { messages: applyPlan(event.messages as unknown as PiMessage[], plan.ops, plan.groups) as unknown as AgentMessage[] };
 	});
 
 	// ── model swap: keep the GUI's context window (and budget) in lockstep ───────
