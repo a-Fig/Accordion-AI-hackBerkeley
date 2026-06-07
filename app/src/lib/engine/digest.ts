@@ -56,14 +56,36 @@ export function foldTag(id: string): string {
 }
 
 /**
+ * Per-block memo of the (immutable) digest string and its token cost. `digest(b)` reads
+ * only fields fixed at parse time — kind, text, id, toolName, isError, tokens — and folding
+ * never touches any of them (it flips override/autoFolded/by). So the result is invariant
+ * for a block's lifetime, yet `refold()` recomputes it twice per fold candidate and every
+ * `liveTokens` read recomputes it per folded block; each call re-runs the FNV hash plus a
+ * couple of text splits. A WeakMap keyed by the block makes those repeats free and is
+ * GC-friendly (no cross-session leak: the entry dies with the block).
+ *
+ * TRIPWIRE: there is no invalidation. This is sound ONLY because a committed block's content
+ * fields are never mutated in place (the live resend path drops duplicate ids rather than
+ * overwriting; applyPlan clones). If a future feature ever mutates an existing block's
+ * `text`/`tokens` (e.g. streaming partial-text growth into a committed block), it MUST clear
+ * both caches for that block, or the rendered digest and saved-tokens accounting go stale.
+ */
+const digestCache = new WeakMap<Block, string>();
+const digestTokenCache = new WeakMap<Block, number>();
+
+/**
  * The full folded representation. Foldable kinds get the `{#<code> FOLDED}` tag followed
  * by the per-kind body; non-foldable kinds (user / tool_call) get the body alone — they
  * are never sent folded to the agent, so tagging them would show a handle the agent can
  * never use and make the GUI render diverge from what the model actually sees.
  */
 export function digest(b: Block): string {
+	const cached = digestCache.get(b);
+	if (cached !== undefined) return cached;
 	const body = digestBody(b);
-	return FOLDABLE_KINDS.has(b.kind) ? `${foldTag(b.id)} ${body}` : body;
+	const out = FOLDABLE_KINDS.has(b.kind) ? `${foldTag(b.id)} ${body}` : body;
+	digestCache.set(b, out);
+	return out;
 }
 
 /** The per-kind essence kept when a block is folded (without the tag). */
@@ -95,5 +117,9 @@ function digestBody(b: Block): string {
 }
 
 export function digestTokens(b: Block): number {
-	return estTokens(digest(b)) + BLOCK_OVERHEAD;
+	const cached = digestTokenCache.get(b);
+	if (cached !== undefined) return cached;
+	const out = estTokens(digest(b)) + BLOCK_OVERHEAD;
+	digestTokenCache.set(b, out);
+	return out;
 }

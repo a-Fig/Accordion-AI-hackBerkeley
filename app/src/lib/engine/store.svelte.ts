@@ -46,11 +46,25 @@ export class AccordionStore {
 	private logN = 0;
 	/** Bumped on every settled change — a cheap redraw signal for canvas views. */
 	version = $state(0);
+	/**
+	 * id → position lookup, kept in lockstep with `blocks` (built in the constructor,
+	 * extended in `appendBlocks` — the only two paths that change the array's length or
+	 * order). Turns `get(id)`, `appendBlocks` dedup, and `isProtected` from O(n) scans into
+	 * O(1) reads; not reactive (it only changes when `blocks` does, and every reactive
+	 * consumer already depends on `blocks`).
+	 */
+	private index = new Map<string, number>();
 
 	constructor(parsed: ParsedSession) {
 		this.meta = parsed.meta;
 		this.blocks = parsed.blocks;
+		this.reindex();
 		this.refold();
+	}
+
+	private reindex(): void {
+		this.index.clear();
+		for (let i = 0; i < this.blocks.length; i++) this.index.set(this.blocks[i].id, i);
 	}
 
 	// ---- reads -------------------------------------------------------------
@@ -67,29 +81,32 @@ export class AccordionStore {
 		return digest(b);
 	}
 
-	get liveTokens(): number {
+	// These aggregates are read many times per render (the header alone reads several
+	// repeatedly). As `$derived` they walk the blocks once per real change and dedupe
+	// across every reader, instead of re-summing ~1k blocks on each property access.
+	liveTokens = $derived.by(() => {
 		let n = 0;
 		for (const b of this.blocks) n += this.effTokens(b);
 		return n;
-	}
-	/** What the context would cost with nothing folded. */
-	get fullTokens(): number {
+	});
+	/** What the context would cost with nothing folded. (Only changes when blocks change.) */
+	fullTokens = $derived.by(() => {
 		let n = 0;
 		for (const b of this.blocks) n += b.tokens;
 		return n;
-	}
-	get savedTokens(): number {
-		return this.fullTokens - this.liveTokens;
-	}
-	get foldedCount(): number {
-		return this.blocks.filter((b) => this.isFolded(b)).length;
-	}
-	get pinnedCount(): number {
-		return this.blocks.filter((b) => b.override === "pinned").length;
-	}
-	get overBudget(): boolean {
-		return this.liveTokens > this.budget;
-	}
+	});
+	savedTokens = $derived.by(() => this.fullTokens - this.liveTokens);
+	foldedCount = $derived.by(() => {
+		let n = 0;
+		for (const b of this.blocks) if (this.isFolded(b)) n++;
+		return n;
+	});
+	pinnedCount = $derived.by(() => {
+		let n = 0;
+		for (const b of this.blocks) if (b.override === "pinned") n++;
+		return n;
+	});
+	overBudget = $derived.by(() => this.liveTokens > this.budget);
 
 	/**
 	 * Index of the first protected block. Walking back from the newest block, the
@@ -98,24 +115,29 @@ export class AccordionStore {
 	 * protects at least the newest block. Returns 0 if the whole session is
 	 * smaller than the protected window (then nothing is fold-eligible).
 	 */
-	get protectedFromIndex(): number {
+	protectedFromIndex = $derived.by(() => {
 		let sum = 0;
 		for (let i = this.blocks.length - 1; i >= 0; i--) {
 			sum += this.blocks[i].tokens;
 			if (sum >= this.protectTokens) return i;
 		}
 		return 0;
-	}
-	/** Is this block inside the protected working tail (never auto-folded)? */
+	});
+	/**
+	 * Is this block inside the protected working tail (never auto-folded)? Resolves the
+	 * block by id, so `b` MUST be store-owned (from `blocks`/`get`) — a foreign object that
+	 * merely shares an id resolves to the committed block's position. Every caller passes a
+	 * store block today; an off-store/wire/ghost block is out of contract here.
+	 */
 	isProtected(b: Block): boolean {
-		return this.blocks.indexOf(b) >= this.protectedFromIndex;
+		return (this.index.get(b.id) ?? -1) >= this.protectedFromIndex;
 	}
 	/** Full tokens currently held in the protected tail. */
-	get protectedTokens(): number {
+	protectedTokens = $derived.by(() => {
 		let n = 0;
 		for (let i = this.protectedFromIndex; i < this.blocks.length; i++) n += this.blocks[i].tokens;
 		return n;
-	}
+	});
 
 	// ---- the automatic folder ---------------------------------------------
 	/**
@@ -185,11 +207,10 @@ export class AccordionStore {
 	 */
 	appendBlocks(blocks: Block[]): void {
 		if (!blocks.length) return;
-		const seen = new Set(this.blocks.map((b) => b.id));
 		const fresh: Block[] = [];
 		for (const b of blocks) {
-			if (seen.has(b.id)) continue; // already committed (or dup within this batch)
-			seen.add(b.id);
+			if (this.index.has(b.id)) continue; // already committed (or dup within this batch)
+			this.index.set(b.id, this.blocks.length + fresh.length);
 			fresh.push(b);
 		}
 		if (!fresh.length) return;
@@ -268,7 +289,8 @@ export class AccordionStore {
 	}
 
 	get(id: string): Block | undefined {
-		return this.blocks.find((b) => b.id === id);
+		const i = this.index.get(id);
+		return i === undefined ? undefined : this.blocks[i];
 	}
 }
 
