@@ -112,15 +112,17 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 				ghostClearAll();
 				const prevContextWindow = session.store.contextWindow;
 				const prevBudget = session.store.budget;
+				const prevProtect = session.store.protectTokens;
 				session.store = new AccordionStore({
 					meta: session.store.meta,
 					blocks: [],
 					lineCount: 0,
 					skipped: 0,
 				});
-				// Carry forward contextWindow and user-adjusted budget across structural resets.
+				// Carry forward contextWindow, user-adjusted budget, and protect-tail across resets.
 				if (prevContextWindow !== null) session.store.setContextWindow(prevContextWindow);
-				if (prevBudget !== undefined) session.store.setBudget(prevBudget);
+				session.store.setBudget(prevBudget);
+				session.store.setProtect(prevProtect);
 			}
 			// Update contextWindow from the sync (refreshed each context hook). Apply to
 			// budget automatically the first time we learn it (before the user can adjust).
@@ -214,6 +216,7 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 
 export function disconnectLive(): void {
 	manualClose = true;
+	budgetLive = false;
 	session.live = false;
 	// Guaranteed teardown (invariant #2): explicit disconnect clears all ghosts
 	// immediately, before the socket close fires.
