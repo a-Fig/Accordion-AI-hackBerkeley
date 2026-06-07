@@ -37,6 +37,11 @@ export function computeFoldOps(store: AccordionStore): FoldOp[] {
 	const ops: FoldOp[] = [];
 	for (const b of store.blocks) {
 		if (!store.isFolded(b)) continue;
+		// A FOLDED group's members are collapsed by their GroupOp (the whole message is removed
+		// and replaced by the summary). Emitting a per-block FoldOp here too is redundant on the
+		// wire (applyPlan removes the message before any in-place fold runs) AND a trap — the op
+		// would carry the block's own digest, divergent from the group summary. Skip them.
+		if (store.groupOf(b)?.folded) continue;
 		if (!FOLDABLE_KINDS.has(b.kind)) continue; // never user / tool_call
 		if (!isDurableId(b.id)) continue; // durable-id safety guard
 		const digestText = store.digestOf(b);

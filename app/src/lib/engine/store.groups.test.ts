@@ -53,6 +53,28 @@ describe("createGroup — validation & message snapping", () => {
 		expect(g.memberIds).toEqual(["a:r1:p0", "a:r1:p1", "a:r1:p2"]);
 	});
 
+	it("snaps whole assistant messages for LOADED/parsed id shapes (<eid>:<i>, no `p`)", () => {
+		// parse.ts emits assistant parts as `<eid>:<i>` (bare numeric index, no `p`). messageKey
+		// must still group them, or the Demo/loaded session snaps each part as its own message.
+		const blocks: Block[] = [
+			b("u:1", "user", 1, 0, 500),
+			b("evt9:0", "thinking", 1, 1, 800),
+			b("evt9:1", "text", 1, 2, 600),
+			b("evt9:2", "tool_call", 1, 3, 100, "c1"),
+			b("evt9:r", "tool_result", 1, 4, 3000, "c1"),
+			b("u:2", "user", 2, 5, 400),
+			b("u:3", "user", 3, 6, 100),
+		];
+		const parsed: ParsedSession = { meta: { format: "pi", title: "t", cwd: "", model: "" }, blocks, lineCount: 0, skipped: 0 };
+		const s = new AccordionStore(parsed);
+		s.setBudget(1_000_000);
+		s.setProtect(0);
+		// selecting just the middle text part must snap to the whole assistant message…
+		const g = s.createGroup("evt9:1", "evt9:1")!;
+		expect(g).not.toBeNull();
+		expect(g.memberIds).toEqual(["evt9:0", "evt9:1", "evt9:2"]); // …NOT the sibling result evt9:r
+	});
+
 	it("refuses a range that reaches into the protected tail", () => {
 		const s = makeStore(); // protectedFromIndex = 7 (u:3)
 		expect(s.createGroup("a:r2:p0", "u:3")).toBeNull();
@@ -154,6 +176,23 @@ describe("group fold/unfold/delete lifecycle", () => {
 		s.unfoldGroup(g.id);
 		s.pin("r:c1");
 		expect(s.get("r:c1")!.override).toBe("pinned");
+	});
+
+	it("auto() is also refused on a collapsed member — a pre-existing override is preserved", () => {
+		const s = makeStore();
+		s.pin("a:r1:p1"); // pin BEFORE grouping (allowed; members keep their override)
+		s.createGroup("a:r1:p0", "r:c1"); // folds the group over the pinned block
+		s.auto("a:r1:p1"); // would normally clear the override — must be a no-op while folded
+		expect(s.get("a:r1:p1")!.override).toBe("pinned");
+	});
+
+	it("pinnedCount does not count a member pinned before grouping (it reads collapsed)", () => {
+		const s = makeStore();
+		s.pin("a:r1:p1");
+		expect(s.pinnedCount).toBe(1);
+		s.createGroup("a:r1:p0", "r:c1"); // the pinned block is now collapsed inside the folder
+		expect(s.isFolded(s.get("a:r1:p1")!)).toBe(true);
+		expect(s.pinnedCount).toBe(0); // header must not contradict what the user sees
 	});
 
 	it("dissolves a group if the protected tail later grows over it (ADR 0006 watch item)", () => {
