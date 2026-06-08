@@ -10,7 +10,7 @@
  * It drives the SAME `session` object the rest of the UI already renders, so
  * "live mode" needs no new view: populating `session.store` is enough.
  */
-import { session } from "../session.svelte";
+import { session, cancelPendingLoad } from "../session.svelte";
 import { AccordionStore } from "../engine/store.svelte";
 import { wireToBlock } from "./mapping";
 import { computeFoldOps, computeGroupOps, resolveUnfold } from "./plan";
@@ -50,6 +50,7 @@ function computePlan(): { ops: FoldOp[]; groups: GroupOp[] } {
 
 export function connectLive(port: number = DEFAULT_PORT): void {
 	if (typeof window === "undefined" || typeof WebSocket === "undefined") return;
+	cancelPendingLoad(); // invalidate any pending file/CC load that would otherwise clobber the live store
 	disconnectLive(); // drop any prior socket
 	manualClose = false;
 	live.status = "connecting";

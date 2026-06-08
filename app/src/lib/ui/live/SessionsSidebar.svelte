@@ -2,6 +2,7 @@
 	import type { SessionEntry } from "$lib/live/registry";
 	import type { ClaudeCodeSession } from "$lib/live/claude";
 	import AnimatedNumber from "$lib/ui/AnimatedNumber.svelte";
+	import { relTime } from "$lib/utils";
 
 	let {
 		source = "pi",
@@ -75,17 +76,6 @@
 	}
 	function label(s: SessionEntry): string {
 		return baseName(s.cwd) || s.title || "session";
-	}
-
-	/** Relative-time helper for CC session mtimes. */
-	function relTime(ms: number): string {
-		const diff = Date.now() - ms;
-		if (diff < 60_000) return "now";
-		if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`;
-		if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h`;
-		if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d`;
-		const d = new Date(ms);
-		return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 	}
 
 	const activeCount = $derived(source === "pi" ? sessions.length : claudeSessions.length);

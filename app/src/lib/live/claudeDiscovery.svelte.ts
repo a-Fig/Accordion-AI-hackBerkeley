@@ -13,8 +13,7 @@ import { isClaudeSession, type ClaudeCodeSession } from "./claude";
 export const claudeDiscovery = $state<{
 	sessions: ClaudeCodeSession[];
 	selected: string | null; // selected ClaudeCodeSession.sessionId, or null
-	error: string;
-}>({ sessions: [], selected: null, error: "" });
+}>({ sessions: [], selected: null });
 
 let _timer: ReturnType<typeof setInterval> | null = null;
 let _refreshing = false; // re-entrancy guard — a slow 50-file head-scan must not pile up
@@ -28,13 +27,11 @@ async function refreshClaude(): Promise<void> {
 	try {
 		const { invoke } = await import("@tauri-apps/api/core");
 		const raw = await invoke<unknown[]>("list_claude_sessions");
-		const sessions: ClaudeCodeSession[] = raw
-			.filter(isClaudeSession)
-			.sort((a, b) => b.mtime - a.mtime); // newest first; defensive sort (Rust already sorts)
+		// Rust list_claude_sessions guarantees mtime-descending order; filter is order-stable.
+		const sessions: ClaudeCodeSession[] = raw.filter(isClaudeSession);
 		claudeDiscovery.sessions = sessions;
 	} catch {
 		// Not Tauri, command missing, or transient error — leave prior list intact.
-		// Only set an error string for genuine command errors (not import failures).
 	} finally {
 		_refreshing = false;
 	}

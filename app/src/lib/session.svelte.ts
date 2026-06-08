@@ -26,11 +26,18 @@ export const session = $state<{
 
 let _pollInterval: ReturnType<typeof setInterval> | null = null;
 let _lastLen = -1;
+let _loadToken = 0;
+
+/** Bump the generation token, invalidating any in-flight async load. */
+export function cancelPendingLoad(): void {
+	_loadToken++;
+}
 
 export const isTauriEnv =
 	typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export async function loadSample() {
+	cancelPendingLoad();
 	_stopPolling();
 	session.error = "";
 	try {
@@ -88,9 +95,7 @@ export async function openFile() {
 			filters: [{ name: "JSONL", extensions: ["jsonl"] }],
 		});
 		if (!selected || typeof selected !== "string") return;
-		await _load(selected, readTextFile);
-		session.readOnly = true;
-		_startPolling(selected, readTextFile);
+		await _openWithReader(selected, readTextFile);
 	} catch (e) {
 		session.error = e instanceof Error ? e.message : String(e);
 	}
@@ -109,21 +114,21 @@ async function readClaudeSession(path: string): Promise<string> {
 
 /**
  * Load a specific Claude Code transcript read-only and tail it for appends.
- * Reuses the existing _load + _startPolling with a native (scope-safe) read function.
+ * Reuses _openWithReader with a native (scope-safe) read function.
  */
 export async function loadFilePath(path: string): Promise<void> {
 	session.error = "";
 	try {
-		await _load(path, readClaudeSession);
-		session.readOnly = true;
-		_startPolling(path, readClaudeSession);
+		await _openWithReader(path, readClaudeSession);
 	} catch (e) {
 		session.error = e instanceof Error ? e.message : String(e);
 	}
 }
 
 async function _load(path: string, readFn: (p: string) => Promise<string>) {
+	const token = _loadToken;
 	const text = await readFn(path);
+	if (token !== _loadToken) return; // a newer selection superseded this load — drop it
 	const prevBudget = session.store?.budget;
 	const prevProtect = session.store?.protectTokens;
 	session.store = new AccordionStore(parse(text));
@@ -133,6 +138,21 @@ async function _load(path: string, readFn: (p: string) => Promise<string>) {
 	session.error = "";
 	_lastLen = text.length;
 	_expose();
+}
+
+/**
+ * Shared helper: cancels any in-flight load, stops the current poll, loads the new
+ * file, then arms readOnly + starts tailing — all guarded by the generation token so
+ * a superseded read can never clobber a later selection.
+ */
+async function _openWithReader(path: string, readFn: (p: string) => Promise<string>) {
+	cancelPendingLoad(); // invalidate any in-flight load
+	_stopPolling();      // stop tailing the previous file before loading the new one
+	const token = _loadToken;
+	await _load(path, readFn);
+	if (token !== _loadToken) return; // superseded during the read — don't arm readOnly/poll
+	session.readOnly = true;
+	_startPolling(path, readFn);
 }
 
 function _startPolling(path: string, readFn: (p: string) => Promise<string>) {

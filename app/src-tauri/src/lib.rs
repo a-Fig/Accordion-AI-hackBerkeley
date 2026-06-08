@@ -16,6 +16,21 @@ use std::time::UNIX_EPOCH;
 use serde_json::Value;
 use tauri::Manager;
 
+// Per-process cache for head-reads: path → (mtime_ms, title, cwd).
+// Avoids re-reading unchanged files on every 3-second poll.
+static HEAD_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (u64, String, String)>>,
+> = std::sync::OnceLock::new();
+
+fn head_cache(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<std::path::PathBuf, (u64, String, String)>>
+{
+    HEAD_CACHE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 /// `~/.accordion` — base of the registry. `ACCORDION_HOME` overrides the home dir
 /// (kept in sync with the extension so both sides can be pointed at a temp dir).
 fn registry_root() -> Option<PathBuf> {
@@ -184,100 +199,127 @@ fn list_claude_sessions() -> Vec<Value> {
             .to_string();
         let file_path_str = fi.path.to_string_lossy().to_string();
 
-        // Read up to 96 KB (ai-title observed at ≤33 KB; 96 KB gives safe headroom).
-        const HEAD_BYTES: u64 = 96 * 1024;
-        let raw_bytes: Vec<u8> = if fi.size <= HEAD_BYTES {
-            match fs::read(&fi.path) {
-                Ok(b) => b,
-                Err(_) => continue,
-            }
-        } else {
-            use std::io::Read;
-            let Ok(mut f) = fs::File::open(&fi.path) else {
-                continue;
-            };
-            let mut buf = vec![0u8; HEAD_BYTES as usize];
-            let n = f.read(&mut buf).unwrap_or(0);
-            buf.truncate(n);
-            buf
+        // Check the per-process head-read cache before touching disk.
+        // Key: (path, mtime_ms) — a changed mtime means the file content may differ.
+        let cached = {
+            let cache = head_cache();
+            cache
+                .get(&fi.path)
+                .filter(|(cached_mtime, _, _)| *cached_mtime == fi.mtime_ms)
+                .map(|(_, t, c)| (t.clone(), c.clone()))
         };
 
-        // Lossily convert so a truncated multibyte sequence at the boundary doesn't panic.
-        let text = String::from_utf8_lossy(&raw_bytes);
-        let lines: Vec<&str> = text.lines().collect();
-
-        let mut title: Option<String> = None;
-        let mut cwd = String::new();
-        let mut first_user_text: Option<String> = None;
-
-        for line in &lines {
-            let Ok(obj) = serde_json::from_str::<Value>(line) else {
-                continue;
+        let (resolved_title, cwd) = if let Some((title, cwd)) = cached {
+            (title, cwd)
+        } else {
+            // Read up to 96 KB (ai-title observed at ≤33 KB; 96 KB gives safe headroom).
+            const HEAD_BYTES: u64 = 96 * 1024;
+            let raw_bytes: Vec<u8> = if fi.size <= HEAD_BYTES {
+                match fs::read(&fi.path) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                }
+            } else {
+                use std::io::Read;
+                let Ok(mut f) = fs::File::open(&fi.path) else {
+                    continue;
+                };
+                let mut buf = vec![0u8; HEAD_BYTES as usize];
+                // File is guaranteed >= HEAD_BYTES, so read_exact fills the buffer.
+                // On an unexpected I/O error keep whatever partial bytes were written
+                // rather than panicking; the lossy decode below handles null padding.
+                let _ = f.read_exact(&mut buf);
+                buf
             };
-            let obj_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-            // Extract cwd from any object that carries it (Claude Code user messages do).
-            if cwd.is_empty() {
-                if let Some(c) = obj.get("cwd").and_then(|v| v.as_str()) {
-                    if !c.is_empty() {
-                        cwd = c.to_string();
-                    }
-                }
-            }
+            // Lossily convert so a truncated multibyte sequence at the boundary doesn't panic.
+            let text = String::from_utf8_lossy(&raw_bytes);
+            let lines: Vec<&str> = text.lines().collect();
 
-            // Title priority: (1) ai-title, (2) summary, (3) first user message.
-            if title.is_none() {
-                if obj_type == "ai-title" {
-                    if let Some(s) = obj.get("aiTitle").and_then(|v| v.as_str()) {
-                        if !s.is_empty() {
-                            title = Some(s.chars().take(80).collect());
-                        }
-                    }
-                } else if obj_type == "summary" {
-                    if let Some(s) = obj.get("summary").and_then(|v| v.as_str()) {
-                        if !s.is_empty() {
-                            title = Some(s.chars().take(80).collect());
+            let mut title: Option<String> = None;
+            let mut cwd = String::new();
+            let mut first_user_text: Option<String> = None;
+
+            for line in &lines {
+                let Ok(obj) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                let obj_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+                // Extract cwd from any object that carries it (Claude Code user messages do).
+                if cwd.is_empty() {
+                    if let Some(c) = obj.get("cwd").and_then(|v| v.as_str()) {
+                        if !c.is_empty() {
+                            cwd = c.to_string();
                         }
                     }
                 }
-            }
 
-            if title.is_none() && first_user_text.is_none() && obj_type == "user" {
-                if let Some(msg) = obj.get("message") {
-                    let text_from_content = if let Some(s) = msg
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                    {
-                        // Plain string content.
-                        Some(s.to_string())
-                    } else if let Some(arr) = msg.get("content").and_then(|v| v.as_array()) {
-                        // Array of content blocks — use first text block.
-                        arr.iter()
-                            .find(|block| {
-                                block.get("type").and_then(|t| t.as_str()) == Some("text")
-                            })
-                            .and_then(|block| block.get("text").and_then(|t| t.as_str()))
-                            .map(|s| s.to_string())
-                    } else {
-                        None
-                    };
-                    if let Some(t) = text_from_content {
-                        if !t.trim().is_empty() {
-                            first_user_text = Some(t.chars().take(80).collect());
+                // Title priority: (1) ai-title, (2) summary, (3) first user message.
+                if title.is_none() {
+                    if obj_type == "ai-title" {
+                        if let Some(s) = obj.get("aiTitle").and_then(|v| v.as_str()) {
+                            if !s.is_empty() {
+                                title = Some(s.chars().take(80).collect());
+                            }
+                        }
+                    } else if obj_type == "summary" {
+                        if let Some(s) = obj.get("summary").and_then(|v| v.as_str()) {
+                            if !s.is_empty() {
+                                title = Some(s.chars().take(80).collect());
+                            }
                         }
                     }
                 }
+
+                if title.is_none() && first_user_text.is_none() && obj_type == "user" {
+                    if let Some(msg) = obj.get("message") {
+                        let text_from_content = if let Some(s) = msg
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                        {
+                            // Plain string content.
+                            Some(s.to_string())
+                        } else if let Some(arr) = msg.get("content").and_then(|v| v.as_array()) {
+                            // Array of content blocks — use first text block.
+                            arr.iter()
+                                .find(|block| {
+                                    block.get("type").and_then(|t| t.as_str()) == Some("text")
+                                })
+                                .and_then(|block| block.get("text").and_then(|t| t.as_str()))
+                                .map(|s| s.to_string())
+                        } else {
+                            None
+                        };
+                        if let Some(t) = text_from_content {
+                            if !t.trim().is_empty() {
+                                first_user_text = Some(t.chars().take(80).collect());
+                            }
+                        }
+                    }
+                }
+
+                // Stop scanning once we have a title (or fallback) and cwd.
+                if (title.is_some() || first_user_text.is_some()) && !cwd.is_empty() {
+                    break;
+                }
             }
 
-            // Stop scanning once we have both.
-            if title.is_some() && !cwd.is_empty() {
-                break;
-            }
-        }
+            let resolved_title = title
+                .or(first_user_text)
+                .unwrap_or_else(|| "(untitled)".to_string());
 
-        let resolved_title = title
-            .or(first_user_text)
-            .unwrap_or_else(|| "(untitled)".to_string());
+            // Update the cache; Mutex is locked only for this insert, not across the read.
+            {
+                let mut cache = head_cache();
+                cache.insert(
+                    fi.path.clone(),
+                    (fi.mtime_ms, resolved_title.clone(), cwd.clone()),
+                );
+            }
+
+            (resolved_title, cwd)
+        };
 
         // project: basename of cwd (split on / and \), or fallback to folder name.
         let project = if !cwd.is_empty() {
@@ -299,6 +341,14 @@ fn list_claude_sessions() -> Vec<Value> {
             "mtime": fi.mtime_ms,
             "size": fi.size
         }));
+    }
+
+    // Prune the cache to only the paths seen in this scan, bounding growth over time.
+    {
+        let seen: std::collections::HashSet<&std::path::PathBuf> =
+            files.iter().map(|fi| &fi.path).collect();
+        let mut cache = head_cache();
+        cache.retain(|path, _| seen.contains(path));
     }
 
     out
