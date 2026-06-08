@@ -27,6 +27,14 @@
 	--k-tool_call: #34d3c2;
 	--k-tool_result: #f0a35e;
 
+	/* multiblock folds (groups) — a warm "folder" family, deliberately NOT a block
+	 * kind color so a group reads as a different KIND of object. Dark brown body,
+	 * lighter brown edge, amber for the "building / act on it" affordances. */
+	--group: #6f4a32;          /* COLLAPSED parent tile fill — warm dark brown */
+	--group-edge: #9c6b43;     /* parent tile inset ring — lighter warm brown */
+	--group-accent: #d39455;   /* amber — creation ring, counter chip, "Unfold to context" primary, open-row left edge */
+	--group-band: rgba(211, 148, 85, 0.07); /* open-row faint warm tint background */
+
 	--radius: 9px;
 	--radius-sm: 6px;
 	--mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;

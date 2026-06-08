@@ -5,7 +5,7 @@
 	import { ghosts, type Ghost } from "../../live/ghostState.svelte";
 	import { nextVacated } from "./drain";
 	import AnimatedNumber from "$lib/ui/AnimatedNumber.svelte";
-	import { buildDisplay, type DisplayRow } from "$lib/engine/display";
+	import { buildDisplay, segmentDisplay, type DisplayRow } from "$lib/engine/display";
 
 	let {
 		store,
@@ -129,12 +129,37 @@
 	const olderTok = $derived(olderTiles.reduce((s, t) => s + store.effTokens(t.b), 0));
 	const protTok = $derived(protectedTiles.reduce((s, t) => s + t.b.tokens, 0));
 
+	// ---- PEEK: pure UI-local "open for viewing" state (the redesign). -------------
+	// A group id in `peeked` renders its members OPEN-but-DULL while the group stays
+	// `folded` → the wire is byte-for-byte unchanged (computeGroupOps still emits the
+	// group's op). CARDINAL INVARIANT: entering/leaving peek NEVER calls a store group
+	// mutator and NEVER touches `group.folded`. Only the explicit "Unfold to context"
+	// button changes the wire. Mutated immutably (reassign a new Set) so `displayRows`
+	// re-derives.
+	let peeked = $state(new Set<string>());
+	function enterPeek(gid: string) {
+		const next = new Set(peeked);
+		next.add(gid);
+		peeked = next;
+	}
+	function leavePeek(gid: string) {
+		if (!peeked.has(gid)) return;
+		const next = new Set(peeked);
+		next.delete(gid);
+		peeked = next;
+	}
+	function togglePeek(gid: string) {
+		peeked.has(gid) ? leavePeek(gid) : enterPeek(gid);
+	}
+
 	// ---- display list for the older box: groups + plain blocks via buildDisplay ----
 	const olderBlocks = $derived(store.blocks.slice(0, protectedFrom));
-	const displayRows = $derived(buildDisplay(olderBlocks, store.groups));
+	const displayRows = $derived(buildDisplay(olderBlocks, store.groups, peeked));
+	// An OPEN group breaks the dense grid into stacked segments (grid · band · grid · …) so its
+	// multi-line band gets natural height instead of overflowing one fixed-height grid track.
+	const segments = $derived(segmentDisplay(displayRows));
 
 	let stage = $state<HTMLDivElement>();
-	let mapEl = $state<HTMLDivElement>();
 	let cell = $state(20);
 	let cols = $state(40);
 	let nudge = $state(0); // user density adjustment (± px per cell)
@@ -237,7 +262,7 @@
 			: "";
 		const savedStr = saved > 0 ? ` · saves ${k(saved)} tok` : "";
 		const stragStr = strag > 0 ? ` · ${strag} kept live` : "";
-		return `group · ${members.length} blocks · ${k(full)} tok full${savedStr}${stragStr}\n${turns}\ndouble-click to unfold · click for preview`;
+		return `group · ${members.length} blocks · ${k(full)} tok full${savedStr}${stragStr}\n${turns}\nclick to peek · double-click to collapse`;
 	}
 
 	// ---- range selection state (local — for creating groups) ----------------
@@ -275,95 +300,92 @@
 		else groupErr = true;
 	}
 
-	// ---- selected group (for the fan-out overlay) ---------------------------
-	let selectedGroupId = $state<string | null>(null);
-	// Position of the overlay card, relative to .map, in px.
-	let overlayX = $state(0);
-	let overlayY = $state(0);
-
-	function openGroupOverlay(gid: string, tileEl: HTMLElement) {
-		selectedGroupId = gid;
-		if (!mapEl) return;
-		const mapRect = mapEl.getBoundingClientRect();
-		const tileRect = tileEl.getBoundingClientRect();
-		// Position below the tile; clamp so the card stays inside .map (card ~220px wide, ~180px tall).
-		const CARD_W = 224;
-		const CARD_H = 180;
-		let x = tileRect.left - mapRect.left;
-		let y = tileRect.bottom - mapRect.top + 6;
-		if (x + CARD_W > mapRect.width - 8) x = mapRect.width - CARD_W - 8;
-		if (x < 8) x = 8;
-		if (y + CARD_H > mapRect.height - 8) y = tileRect.top - mapRect.top - CARD_H - 6;
-		if (y < 8) y = 8;
-		overlayX = x;
-		overlayY = y;
-	}
-	function closeOverlay() {
-		selectedGroupId = null;
-	}
-	// Single-click overlay open is deferred so a double-click (unfold) can cancel it (see onClick).
-	let groupClickTimer: ReturnType<typeof setTimeout> | undefined;
-	onDestroy(() => clearTimeout(groupClickTimer));
-	const overlayGroup = $derived(selectedGroupId ? store.groupById(selectedGroupId) : undefined);
-	const overlayMembers = $derived(overlayGroup ? store.groupMembers(overlayGroup) : []);
-
-	// A pending range-select / open overlay is bound to the CURRENT session and the grid
-	// view. When the session prop swaps, stale ids must never survive into createGroup
-	// (another session may reuse an id); when we leave the grid the toolbar/overlay are gone
-	// anyway. Clear on either change.
+	// A pending range-select / peek set is bound to the CURRENT session and the grid view.
+	// When the session prop swaps, stale ids must never survive into createGroup (another
+	// session may reuse an id) and a stale peek id must not leak across sessions; when we
+	// leave the grid the toolbar/open rows are gone anyway. Clear on either change.
 	$effect(() => {
 		void store;
 		untrack(() => {
 			clearRange();
-			closeOverlay();
+			peeked = new Set();
 		});
 	});
 	$effect(() => {
 		if (zoom !== "grid")
 			untrack(() => {
 				clearRange();
-				closeOverlay();
+				peeked = new Set();
 			});
 	});
 
-	function findId(e: Event): string | null {
-		const el = (e.target as HTMLElement).closest<HTMLElement>("[data-id]");
-		return el?.dataset.id ?? null;
+	// ---- hit-testing helpers --------------------------------------------------
+	// A member tile (data-id) nested inside a group band (data-group) must take
+	// precedence over the enclosing band so clicks on members 2..N are reachable.
+	// The parent group tile itself has data-group but NO data-id (it renders with
+	// only `data-group={g.id}`), so it still routes to the group handler.
+	//
+	// Resolution: find both candidates from the click target, then apply:
+	//   • data-id found AND (no data-group, OR data-group contains the data-id el)
+	//     → it's a block click (the data-id is the more specific / deeper element).
+	//   • Otherwise, data-group found → it's a group click.
+	//
+	// Returns { kind: "block", id } | { kind: "group", gid } | { kind: "none" }.
+	type HitResult =
+		| { kind: "block"; id: string }
+		| { kind: "group"; gid: string }
+		| { kind: "none" };
+	function resolveHit(e: MouseEvent): HitResult {
+		const t = e.target as HTMLElement;
+		const idEl = t.closest<HTMLElement>("[data-id]");
+		const groupEl = t.closest<HTMLElement>("[data-group]");
+		// A block click: a data-id element exists and is either outside any group
+		// container, or is INSIDE one (groupEl.contains(idEl) — the data-id is the
+		// more-specific descendant). The open band carries data-group, so a member
+		// tile's data-id sits inside it; the contains() check is what lets the member
+		// win over the band. A click on the band background (no data-id) falls through
+		// to the group below → toggle peek / collapse, never a dead no-op.
+		const isBlockClick = !!idEl && (!groupEl || groupEl.contains(idEl));
+		if (isBlockClick && idEl!.dataset.id) return { kind: "block", id: idEl!.dataset.id };
+		if (groupEl?.dataset.group) return { kind: "group", gid: groupEl.dataset.group };
+		return { kind: "none" };
 	}
-	function findGroupId(e: Event): string | null {
-		const el = (e.target as HTMLElement).closest<HTMLElement>("[data-group]");
-		return el?.dataset.group ?? null;
+
+	// Collapse a group to its resting one-tile state via ANY path: if it is live on the
+	// wire (unfolded), re-fold it; and ALWAYS drop it from `peeked` so it can never return
+	// to a stale dull-preview row. The ONLY store mutation here is foldGroup (re-fold) —
+	// peek itself is never a wire op.
+	function collapseGroup(gid: string) {
+		const g = store.groupById(gid);
+		if (g && !g.folded) store.foldGroup(gid);
+		leavePeek(gid);
 	}
 
 	function onClick(e: MouseEvent) {
-		// Overlay close: clicking outside the overlay (but inside .map) closes it.
-		if (selectedGroupId) {
-			const overlay = (e.target as HTMLElement).closest<HTMLElement>(".group-overlay");
-			if (!overlay) closeOverlay();
-		}
+		const hit = resolveHit(e);
 
-		const gid = findGroupId(e);
-		if (gid) {
+		if (hit.kind === "group") {
+			const gid = hit.gid;
 			// During an active range-select, a group tile is not a valid range target (groups
-			// can't nest or overlap), so shift-clicking one must NOT hijack the gesture by
-			// opening the overlay — ignore it and let the user pick a plain block to close the
-			// range.
+			// can't nest or overlap), so shift-clicking one must NOT hijack the gesture — ignore
+			// it and let the user pick a plain block to close the range.
 			if (e.shiftKey && rangeAnchorId) return;
-			// A FOLDED group tile → open the fan-out overlay. An OPEN group's dull parent has
-			// its own band controls (Re-fold / Delete), so a single click there is a no-op.
 			const grp = store.groupById(gid);
-			const tileEl = (e.target as HTMLElement).closest<HTMLElement>("[data-group]");
-			if (grp?.folded && tileEl) {
-				// Defer the open so a DOUBLE-click (which unfolds the group) doesn't first flash
-				// the overlay on its two leading `click` events. onDbl cancels this timer.
-				clearTimeout(groupClickTimer);
-				groupClickTimer = setTimeout(() => openGroupOverlay(gid, tileEl), 200);
-			}
+			// Selecting the group gives the Inspector context (its first member) and lights the
+			// parent tile's `.sel` highlight (keyed off member inclusion). This is pure selection,
+			// NOT a wire mutation.
+			// Length guard: createGroup enforces >= 2 members, so an empty group is an invariant
+			// violation — but read defensively so a bad state never sets selection to undefined.
+			if (grp && grp.memberIds.length > 0 && grp.memberIds[0] !== selectedId) onselect(grp.memberIds[0]);
+			// A FOLDED parent tile toggles PEEK (open-for-viewing, wire UNCHANGED). An UNFOLDED
+			// group's dull parent already has its own row buttons (Re-fold / Delete), so a plain
+			// click there is a no-op — unfolding/refolding is deliberate via those buttons only.
+			if (grp?.folded) togglePeek(gid);
 			return;
 		}
 
-		const id = findId(e);
-		if (!id) return;
+		if (hit.kind !== "block") return;
+		const id = hit.id;
 		const bl = store.get(id);
 
 		if (e.shiftKey && rangeAnchorId) {
@@ -387,41 +409,47 @@
 	}
 
 	function onDbl(e: MouseEvent) {
-		const gid = findGroupId(e);
-		if (gid) {
-			clearTimeout(groupClickTimer); // cancel the deferred single-click overlay
-			store.toggleGroup(gid);
-			closeOverlay();
+		const hit = resolveHit(e);
+		if (hit.kind === "group") {
+			// Double-click a parent (collapsed / peek / unfolded) → COLLAPSE. Never unfolds —
+			// going live is deliberate via the "Unfold to context" button only.
+			collapseGroup(hit.gid);
 			return;
 		}
-		const id = findId(e);
-		if (id) store.toggle(id);
+		if (hit.kind === "block") store.toggle(hit.id);
 	}
 
 	function onKeydown(e: KeyboardEvent) {
 		if (e.key === "Escape") {
-			if (selectedGroupId) { closeOverlay(); return; }
 			if (rangeAnchorId) { clearRange(); return; }
+		}
+		// Enter commits a pending range (≥2 blocks) into a group — the keyboard twin of the
+		// "Group N blocks" button, matching the selection chip's hint.
+		if (e.key === "Enter" && rangeCount >= 2) {
+			e.preventDefault();
+			handleCreateGroup();
+			return;
 		}
 		onKey(e);
 	}
 
 	// ---- arrow-key traversal between neighboring blocks -------------------
-	// Focusable STOPS in display order: a FOLDED group is ONE stop (its first member), so an
-	// arrow press crosses a collapsed range in a single step instead of one blind press per
-	// hidden member (the members have no tile to scroll to). Mirrors the grid display-list.
-	// Only the GRID collapses a folded group to one tile; Turns/Chains still render every
-	// member as its own ribbon tile, so the group-skip applies in grid view only.
-	const foldedGroupOf = (b: Block): Group | undefined => {
+	// Focusable STOPS in display order: a COLLAPSED group is ONE stop (its first member), so
+	// an arrow press crosses the collapsed range in a single step instead of one blind press
+	// per hidden member (the members have no tile to scroll to). Mirrors the grid display-list.
+	// A PEEKED or UNFOLDED group is OPEN — its members each have their own data-id tile, so it
+	// is NOT collapsed to one stop here (the members are individually traversable). Only the
+	// GRID collapses; Turns/Chains render every member as its own ribbon tile.
+	const collapsedGroupOf = (b: Block): Group | undefined => {
 		if (zoom !== "grid") return undefined;
 		const g = store.groupOf(b);
-		return g?.folded ? g : undefined;
+		return g?.folded && !peeked.has(g.id) ? g : undefined;
 	};
 	const navOrder = $derived.by<number[]>(() => {
 		const blocks = store.blocks;
 		const out: number[] = [];
 		for (let i = 0; i < blocks.length; i++) {
-			const g = foldedGroupOf(blocks[i]);
+			const g = collapsedGroupOf(blocks[i]);
 			if (g && blocks[i].id !== g.memberIds[0]) continue; // hidden member — not a stop
 			out.push(i);
 		}
@@ -430,7 +458,7 @@
 	function focusStop(blockIdx: number) {
 		const b = store.blocks[blockIdx];
 		if (!b) return;
-		const g = foldedGroupOf(b);
+		const g = collapsedGroupOf(b);
 		if (g) {
 			// Select the group's first member (Inspector context) and scroll its parent tile —
 			// the folded-group tile carries data-group, not data-id.
@@ -455,7 +483,7 @@
 		if (selectedId) {
 			const sel = store.blocks.findIndex((b) => b.id === selectedId);
 			if (sel !== -1) {
-				const g = foldedGroupOf(store.blocks[sel]);
+				const g = collapsedGroupOf(store.blocks[sel]);
 				const repId = g ? g.memberIds[0] : selectedId;
 				pos = order.findIndex((i) => store.blocks[i].id === repId);
 			}
@@ -477,7 +505,7 @@
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
-<div class="map" bind:this={mapEl}>
+<div class="map">
 	<div class="toolbar">
 		<div class="seg">
 			<button class:on={zoom === "grid"} onclick={() => (zoom = "grid")}>Grid</button>
@@ -494,10 +522,14 @@
 			</span>
 			<span class="grow"></span>
 			{#if rangeCount >= 2}
-				<span class="range-bar">
-					<button class="group-btn" onclick={handleCreateGroup}>Group {rangeCount} blocks</button>
-					{#if groupErr}<span class="range-err">can’t group — overlaps a group or the protected tail</span>{/if}
-					<button class="range-clear" onclick={clearRange} title="Clear selection">✕</button>
+				<span class="range-bar" class:err={groupErr}>
+					<span class="range-chip">
+						<b>{rangeCount}</b> blocks <span class="arrow">→</span> group
+						<span class="dim">· Enter to create</span>
+					</span>
+					<button class="group-btn" onclick={handleCreateGroup}>Group</button>
+					{#if groupErr}<span class="range-err">overlaps a group or the protected tail</span>{/if}
+					<button class="range-clear" onclick={clearRange} title="Clear selection (Esc)">✕</button>
 				</span>
 			{:else if rangeAnchorId}
 				<span class="range-hint dim">shift-click another block to complete range</span>
@@ -538,10 +570,12 @@
 					title="{g.kind} · forming…"
 				></div>
 			{/snippet}
-			{#snippet tile(t: { b: Block; face: number }, prot: boolean)}
+			{#snippet tile(t: { b: Block; face: number }, prot: boolean, forceFold = false)}
+				<!-- forceFold: a PEEK member is shown DULL (the `.folded` grammar) regardless of
+				     its own state — it's being previewed, not put live. -->
 				<div
 					class="cell face f{t.face} k-{t.b.kind}"
-					class:folded={store.isFolded(t.b)}
+					class:folded={forceFold || store.isFolded(t.b)}
 					class:pinned={t.b.override === "pinned"}
 					class:sel={t.b.id === selectedId}
 					class:inrange={rangeSet.has(t.b.id)}
@@ -555,38 +589,62 @@
 						<div class="rail" title="{olderTok.toLocaleString()} live tokens · foldable">
 							<span class="tok"><AnimatedNumber value={olderTok} format={k} /></span>
 						</div>
-						<div class="grid">
-							{#each displayRows as row (row.type === "block" ? row.block.id : row.group.id)}
-								{#if row.type === "block"}
-									{@const t = { b: row.block, face: faceFor(row.block.tokens) }}
-									{@render tile(t, false)}
-								{:else if row.type === "group"}
-									{@const g = row.group}
-									{@const gface = faceFor(store.groupLiveTokens(g))}
-									<div
-										class="cell face f{gface} group-tile"
-										class:sel={selectedGroupId === g.id || (selectedId !== null && g.memberIds.includes(selectedId))}
-										data-group={g.id}
-										title={groupTip(g)}
-									></div>
+						<div class="stack">
+							{#each segments as seg (seg.kind === "band" ? "band-" + seg.row.group.id : "tiles-" + (seg.rows[0].type === "block" ? seg.rows[0].block.id : seg.rows[0].group.id))}
+								{#if seg.kind === "tiles"}
+									<div class="grid">
+										{#each seg.rows as row (row.type === "block" ? row.block.id : row.group.id)}
+											{#if row.type === "block"}
+												{@const t = { b: row.block, face: faceFor(row.block.tokens) }}
+												{@render tile(t, false)}
+											{:else}
+												{@const g = row.group}
+												{@const gface = faceFor(store.groupLiveTokens(g))}
+												<!-- COLLAPSED: one folder tile standing in for the range. -->
+												<div
+													class="cell face f{gface} group-tile"
+													class:sel={selectedId !== null && g.memberIds.includes(selectedId)}
+													data-group={g.id}
+													title={groupTip(g)}
+												></div>
+											{/if}
+										{/each}
+									</div>
 								{:else}
-									{@const g = row.group}
-									<!-- open group: a full-width band that interrupts the grid -->
-									<div class="group-band" style:grid-column="1 / -1">
+									{@const g = seg.row.group}
+									{@const live = seg.row.live}
+									<!-- OPEN GROUP — its own full-width row at natural height (NOT a grid track, so the
+									     band can't overflow/overlap the tiles). live=false → PEEK (dull preview, wire
+									     unchanged); live=true → UNFOLDED (members live). Accented left edge = one group.
+									     data-group on the band itself: clicking the band background/padding resolves to
+									     the group (toggle peek / collapse), while a member tile's data-id still wins via
+									     groupEl.contains(idEl) in resolveHit — so no region of the band is a dead no-op. -->
+									<div class="group-band" class:live data-group={g.id}>
 										<div
 											class="cell face f{faceFor(store.groupLiveTokens(g))} group-tile group-tile-open"
+											class:sel={selectedId !== null && g.memberIds.includes(selectedId)}
 											data-group={g.id}
-											title="group (open) · {row.members.length} blocks · double-click to fold"
+											title="{live ? 'group (unfolded — live)' : 'group (peek — preview only)'} · {seg.row.members.length} blocks · double-click to collapse"
 										></div>
 										<div class="band-members">
-											{#each row.members as mb (mb.id)}
+											{#each seg.row.members as mb (mb.id)}
 												{@const mt = { b: mb, face: faceFor(mb.tokens) }}
-												{@render tile(mt, false)}
+												{@render tile(mt, false, !live)}
 											{/each}
 										</div>
 										<div class="band-actions">
-											<button class="band-btn" onclick={(e) => { e.stopPropagation(); store.foldGroup(g.id); }}>Re-fold</button>
-											<button class="band-btn danger" onclick={(e) => { e.stopPropagation(); store.deleteGroup(g.id); }}>Delete</button>
+											{#if live}
+												<!-- UNFOLDED row: Re-fold returns to a COLLAPSED tile (clears peek); Delete drops the group. -->
+												<button class="band-btn" onclick={(e) => { e.stopPropagation(); collapseGroup(g.id); }}>Re-fold</button>
+												<button class="band-btn danger" onclick={(e) => { e.stopPropagation(); leavePeek(g.id); store.deleteGroup(g.id); }}>Delete</button>
+											{:else}
+												<!-- PEEK row: the ONLY wire-changing button is "Unfold to context" (store.unfoldGroup);
+												     it also clears the peek entry so re-folding later returns to a clean COLLAPSED tile.
+												     "Collapse" is pure UI (leavePeek). Delete drops the group + its stale peek entry. -->
+												<button class="band-btn primary" onclick={(e) => { e.stopPropagation(); leavePeek(g.id); store.unfoldGroup(g.id); }}>Unfold to context</button>
+												<button class="band-btn" onclick={(e) => { e.stopPropagation(); leavePeek(g.id); }}>Collapse</button>
+												<button class="band-btn danger tertiary" onclick={(e) => { e.stopPropagation(); leavePeek(g.id); store.deleteGroup(g.id); }}>Delete</button>
+											{/if}
 										</div>
 									</div>
 								{/if}
@@ -632,31 +690,6 @@
 			{/each}
 		{/if}
 	</div>
-
-	<!-- Fan-out overlay for a selected folded group. Absolutely positioned inside .map
-	     so it does NOT reflow the grid. Compositor-only enter: opacity+transform only. -->
-	{#if overlayGroup && overlayGroup.folded}
-		<!-- svelte-ignore a11y_click_events_have_key_events -->
-		<div
-			class="group-overlay"
-			style:left="{overlayX}px"
-			style:top="{overlayY}px"
-			role="dialog"
-			aria-label="Group preview"
-		>
-			<div class="overlay-members">
-				{#each overlayMembers as mb (mb.id)}
-					<div class="mini-tile k-{mb.kind}" title="{mb.kind} · {mb.tokens} tok"></div>
-				{/each}
-			</div>
-			<p class="overlay-summary">{store.groupSummary(overlayGroup)}</p>
-			<div class="overlay-actions">
-				<button onclick={() => { store.unfoldGroup(overlayGroup!.id); closeOverlay(); }}>Unfold</button>
-				<button class="danger" onclick={() => { store.deleteGroup(overlayGroup!.id); closeOverlay(); }}>Delete</button>
-				<button class="close-btn" onclick={closeOverlay}>✕</button>
-			</div>
-		</div>
-	{/if}
 </div>
 
 <style>
@@ -666,7 +699,7 @@
 		height: 100%;
 		min-height: 0;
 		background: var(--bg);
-		position: relative; /* anchor for the fan-out overlay */
+		position: relative;
 	}
 
 	/* ---- toolbar ---- */
@@ -783,24 +816,50 @@
 		font-variant-numeric: tabular-nums;
 	}
 
-	/* ---- range selection toolbar affordances ---- */
+	/* ---- range selection toolbar affordances — a warm "building" chip ---- */
 	.range-bar {
 		display: inline-flex;
 		align-items: center;
+		gap: 6px;
+	}
+	/* The counter chip: reads the live selection count and tells the user how to commit.
+	   Warm amber border so it reads as forming a NEW object (not hiding one). */
+	.range-chip {
+		display: inline-flex;
+		align-items: center;
 		gap: 4px;
+		font-size: 11px;
+		color: var(--text);
+		background: color-mix(in srgb, var(--group-accent) 12%, var(--panel));
+		border: 1px solid color-mix(in srgb, var(--group-accent) 55%, transparent);
+		border-radius: 6px;
+		padding: 3px 9px;
+		white-space: nowrap;
+	}
+	.range-chip b {
+		font-variant-numeric: tabular-nums;
+		color: var(--group-accent);
+		font-weight: 800;
+	}
+	.range-chip .arrow {
+		color: var(--group-accent);
+		font-weight: 700;
+	}
+	.range-bar.err .range-chip {
+		border-color: color-mix(in srgb, var(--danger) 60%, transparent);
 	}
 	.group-btn {
-		background: var(--accent);
-		color: #fff;
+		background: var(--group-accent);
+		color: #1a0f06;
 		border: none;
 		border-radius: 6px;
 		font-size: 11px;
-		font-weight: 600;
-		padding: 4px 10px;
+		font-weight: 700;
+		padding: 4px 12px;
 		cursor: pointer;
 	}
 	.group-btn:hover {
-		opacity: 0.85;
+		filter: brightness(1.08);
 	}
 	.range-clear {
 		background: transparent;
@@ -889,6 +948,16 @@
 		box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
 	}
 
+	/* ---- the older box's content: a vertical stack of tile-grids and open-group bands
+	   (paragraph-like). Splitting at each open group keeps every grid uniform and lets bands
+	   size to their content. The protected box has no groups, so it uses a bare .grid. ---- */
+	.stack {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
 	/* ---- grid: uniform squares, conversation order (no dense backfill) ---- */
 	.grid {
 		display: grid;
@@ -899,6 +968,10 @@
 		justify-content: center;
 		flex: 1;
 		min-width: 0;
+	}
+	/* Inside the stack each grid is natural height (a column child must not grow vertically). */
+	.stack .grid {
+		flex: 0 0 auto;
 	}
 	/* while scrolling, make tiles transparent to the pointer so a stationary cursor
 	   doesn't trigger :hover on every tile that slides past it (repaint storm). */
@@ -948,10 +1021,13 @@
 		box-shadow: none;
 	}
 
-	/* pending range selection highlight — compositor-only outline, no filter */
+	/* pending range selection highlight — a warm "building" treatment so the range reads
+	   as forming a NEW object, not hiding one. Bold amber inset ring + a dark inset for
+	   contrast; the faint warm fill is an inset box-shadow (no per-tile gradient/filter). */
 	.cell.inrange {
-		box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 80%, transparent),
-		            inset 0 0 0 3px rgba(0, 0, 0, 0.35);
+		box-shadow: inset 0 0 0 2px var(--group-accent),
+		            inset 0 0 0 3px rgba(0, 0, 0, 0.4),
+		            inset 0 0 0 100px color-mix(in srgb, var(--group-accent) 30%, transparent);
 	}
 	.cell.inrange:hover {
 		filter: brightness(1.22);
@@ -963,7 +1039,7 @@
 		100% { transform: scale(1); }
 	}
 	.cell.sel {
-		/* inset-only so paint-containment (content-visibility) never clips it */
+		/* inset-only: an outset ring would clip against neighbouring tiles in the dense grid */
 		box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 0 3px rgba(0, 0, 0, 0.55);
 		filter: brightness(1.18);
 		z-index: 3;
@@ -972,51 +1048,74 @@
 
 	/* ---- group tile: the single "folder" tile representing a folded group ---- */
 	.group-tile {
-		/* Distinct folder/stack aesthetic: background is the accent channel so it's
-		   clearly not a block. A few box-shadows are fine (few group tiles, not 982). */
-		background: color-mix(in srgb, var(--accent) 40%, var(--panel-3));
+		/* Warm dark-brown body so a group reads as a different KIND of object — not a block
+		   kind, not the accent-blue. The folder/stack hint is INSET ONLY (CLAUDE.md: outset
+		   box-shadows clip): a lighter inset top-left highlight + a darker inset bottom-right
+		   edge fakes a raised, stacked sheet. The dice pips (.face::before) sit on top. */
+		background: var(--group);
 		box-shadow:
-			inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 60%, transparent),
-			2px 2px 0 1px color-mix(in srgb, var(--accent) 30%, transparent),
-			3px 3px 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
+			inset 0 0 0 1px var(--group-edge),
+			inset 2px 2px 0 -1px color-mix(in srgb, #fff 16%, transparent),
+			inset -3px -3px 4px -2px rgba(0, 0, 0, 0.5);
 		cursor: pointer;
 		border-radius: 4px;
 	}
 	.group-tile:hover {
-		filter: brightness(1.18);
+		filter: brightness(1.16);
 	}
 	.group-tile.sel {
 		box-shadow:
-			inset 0 0 0 2px var(--accent),
+			inset 0 0 0 2px var(--group-accent),
 			inset 0 0 0 3px rgba(0, 0, 0, 0.55),
-			2px 2px 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
-		filter: brightness(1.18);
+			inset -3px -3px 4px -2px rgba(0, 0, 0, 0.5);
+		filter: brightness(1.14);
 		z-index: 3;
 		animation: pop var(--dur-fast) var(--ease-spring);
 	}
 
-	/* dull parent tile inside an open group band */
+	/* dull parent tile inside an open row (peek or unfolded) — recessed; one element per
+	   group, so a single `filter` here is acceptable (not the 982-grid). */
 	.group-tile-open {
-		opacity: 0.45;
+		/* In the flex band (no longer a grid cell) the tile has no intrinsic size — pin it. */
+		width: var(--cell);
+		height: var(--cell);
+		flex: 0 0 auto;
+		opacity: 0.5;
 		filter: saturate(0.5);
 		cursor: pointer;
 	}
 	.group-tile-open:hover {
-		opacity: 0.7;
-		filter: saturate(0.8) brightness(1.12);
+		opacity: 0.75;
+		filter: saturate(0.8) brightness(1.1);
+	}
+	.group-tile-open.sel {
+		opacity: 0.9;
+		box-shadow:
+			inset 0 0 0 2px var(--group-accent),
+			inset 0 0 0 3px rgba(0, 0, 0, 0.55);
 	}
 
-	/* ---- open group band: a full-width tinted strip interrupting the grid ---- */
+	/* ---- open group row: its own full-width band between tile grids (a flex child of .stack,
+	   NOT a grid item) so it takes natural height and can never overflow a fixed cell-height
+	   track and overlap the tiles below. The accented LEFT edge signals "this whole row is one
+	   group." Opening/closing only inserts/removes this band — the tile grids stay uniform. ---- */
 	.group-band {
-		grid-column: 1 / -1;
-		background: color-mix(in srgb, var(--accent) 8%, transparent);
-		border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+		width: 100%;
+		box-sizing: border-box;
+		background: var(--group-band);
+		border: 1px solid color-mix(in srgb, var(--group-accent) 26%, transparent);
+		border-left: 3px solid color-mix(in srgb, var(--group-accent) 60%, transparent);
 		border-radius: 6px;
-		padding: 6px 8px;
+		padding: 6px 8px 6px 9px;
 		display: flex;
 		align-items: center;
-		gap: 6px;
+		gap: 8px;
 		flex-wrap: wrap;
+	}
+	/* UNFOLDED (live): a stronger warm edge — the members are really in the model's context. */
+	.group-band.live {
+		background: color-mix(in srgb, var(--group-accent) 11%, transparent);
+		border-left-color: var(--group-accent);
 	}
 	.band-members {
 		display: flex;
@@ -1025,9 +1124,8 @@
 		flex: 1;
 		min-width: 0;
 	}
-	/* Member tiles inside an open band use the same .cell + kind classes — they
-	   inherit all the existing tile styles. The band gives them a uniform small size
-	   via --cell from the parent .boxes. */
+	/* Member tiles inside an open row use the same .cell + kind classes — they inherit all
+	   the existing tile styles. The row gives them a uniform small size via --cell. */
 	.band-members .cell {
 		width: var(--cell);
 		height: var(--cell);
@@ -1052,9 +1150,30 @@
 		color: var(--text);
 		background: var(--panel);
 	}
+	/* "Unfold to context" — the primary, warm/amber action (the only one that changes the
+	   wire). Filled so it clearly outranks Collapse/Delete. */
+	.band-btn.primary {
+		background: var(--group-accent);
+		border-color: color-mix(in srgb, var(--group-accent) 70%, #000);
+		color: #1a0f06;
+		font-weight: 700;
+	}
+	.band-btn.primary:hover {
+		background: var(--group-accent);
+		filter: brightness(1.08);
+		color: #1a0f06;
+	}
+	/* Delete is tertiary in the peek row — quieter until hovered. */
+	.band-btn.tertiary {
+		opacity: 0.7;
+	}
+	.band-btn.tertiary:hover {
+		opacity: 1;
+	}
 	.band-btn.danger:hover {
 		color: #f87171;
 		border-color: #f87171;
+		background: var(--panel-3);
 	}
 
 	/* ---- ghost tiles: third visual state — "forming" ----
@@ -1117,86 +1236,6 @@
 	}
 	.f6::before {
 		background-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><g fill='%23fff' stroke='%23000' stroke-opacity='.5' stroke-width='3.6'><circle cx='28' cy='26' r='11'/><circle cx='72' cy='26' r='11'/><circle cx='28' cy='50' r='11'/><circle cx='72' cy='50' r='11'/><circle cx='28' cy='74' r='11'/><circle cx='72' cy='74' r='11'/></g></svg>");
-	}
-
-	/* ---- fan-out overlay: absolutely positioned in .map (no reflow) ---- */
-	.group-overlay {
-		position: absolute;
-		z-index: 40;
-		background: var(--panel-3);
-		border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--line));
-		border-radius: 10px;
-		padding: 10px 12px;
-		width: 224px;
-		box-shadow:
-			0 4px 16px rgba(0, 0, 0, 0.35),
-			0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
-		/* Compositor-only enter: opacity + translate, no filter/gradient animation */
-		animation: overlay-in 140ms var(--ease-out, ease-out) both;
-		pointer-events: all;
-	}
-	@keyframes overlay-in {
-		from { opacity: 0; transform: translateY(-6px) scale(0.97); }
-		to   { opacity: 1; transform: translateY(0)   scale(1);    }
-	}
-	.overlay-members {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 4px;
-		margin-bottom: 8px;
-	}
-	.mini-tile {
-		width: 14px;
-		height: 14px;
-		border-radius: 2px;
-		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
-		flex: 0 0 auto;
-	}
-	.mini-tile.k-user { background: var(--k-user); }
-	.mini-tile.k-text { background: var(--k-text); }
-	.mini-tile.k-thinking { background: var(--k-thinking); }
-	.mini-tile.k-tool_call { background: var(--k-tool_call); }
-	.mini-tile.k-tool_result { background: var(--k-tool_result); }
-	.overlay-summary {
-		font-size: 10px;
-		color: var(--muted);
-		line-height: 1.4;
-		margin: 0 0 10px;
-		max-height: 72px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		display: -webkit-box;
-		-webkit-line-clamp: 4;
-		line-clamp: 4;
-		-webkit-box-orient: vertical;
-	}
-	.overlay-actions {
-		display: flex;
-		gap: 6px;
-		align-items: center;
-	}
-	.overlay-actions button {
-		background: var(--panel);
-		border: 1px solid var(--line);
-		color: var(--muted);
-		font-size: 11px;
-		border-radius: 6px;
-		padding: 4px 10px;
-		cursor: pointer;
-		flex: 1;
-	}
-	.overlay-actions button:hover {
-		color: var(--text);
-		background: var(--panel-3);
-	}
-	.overlay-actions button.danger:hover {
-		color: #f87171;
-		border-color: #f87171;
-	}
-	.overlay-actions .close-btn {
-		flex: 0 0 auto;
-		padding: 4px 8px;
-		font-size: 10px;
 	}
 
 	/* ---- ribbon rows (turns / chains) ---- */
