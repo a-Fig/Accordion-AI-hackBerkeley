@@ -2,27 +2,46 @@
  * display.ts — the grid's render list (ADR 0006 §3).
  *
  * `ContextMap` no longer maps `blocks` 1:1. It renders the rows this pure function
- * produces: a folded group becomes ONE parent tile standing in for its range; an open
- * group becomes a dull parent tile plus its member tiles wrapped in a band; everything
- * else is a plain block tile. Kept pure (no store, no runes) so the layout transform is
- * unit-testable on its own and the component stays thin.
+ * produces. A group has THREE display states (the redesign):
  *
- * Groups are always entirely older than the protected tail, so a group never straddles
- * the grid's older/protected split — callers may safely build over either slice. A group
- * whose first member is absent from the given block list is dropped defensively (its
- * members render as nothing rather than as ungrouped strays), which only arises if an
- * invariant is already broken.
+ *   COLLAPSED  — folded && !peeked → ONE parent tile standing in for the whole range.
+ *   PEEK       — folded &&  peeked → an open row; members shown DULL (preview only). The
+ *                wire is UNCHANGED (the group is still folded), so the model's context is
+ *                byte-for-byte identical to COLLAPSED. Peek is pure UI-local state passed
+ *                in via `peeked`; this function NEVER mutates `group.folded`.
+ *   UNFOLDED   — !folded → an open row; members shown LIVE (with their own per-block fold
+ *                state). The wire is uncollapsed; the model now sees the members.
+ *
+ * The open states are distinguished on the wire-relevant axis by `live`: a `groupOpen`
+ * row carries `live=false` for PEEK (folded, dull preview) and `live=true` for UNFOLDED
+ * (folded=false, members live). `folded=false` always wins → `live=true`, even if the id
+ * is also in `peeked` (you can't peek a group that's already unfolded).
+ *
+ * Kept pure (no store, no runes) so the layout transform is unit-testable on its own and
+ * the component stays thin. Groups are always entirely older than the protected tail, so a
+ * group never straddles the grid's older/protected split — callers may safely build over
+ * either slice. A group whose first member is absent from the given block list is dropped
+ * defensively (its members render as plain blocks rather than as ungrouped strays), which
+ * only arises if an invariant is already broken.
  */
 import type { Block, Group } from "./types";
 
 export type DisplayRow =
 	| { type: "block"; block: Block }
-	/** Folded group → render ONE parent tile (members hidden behind it). */
+	/** COLLAPSED group → render ONE parent tile (members hidden behind it). */
 	| { type: "group"; group: Group; members: Block[] }
-	/** Open group → render the dull parent at the band's left, then each member tile. */
-	| { type: "groupOpen"; group: Group; members: Block[] };
+	/**
+	 * Open group → render the dull parent at the row's left, then each member tile.
+	 * `live=false` → PEEK (folded, members previewed dull); `live=true` → UNFOLDED
+	 * (members live with their own fold state). PEEK never touches the wire.
+	 */
+	| { type: "groupOpen"; group: Group; members: Block[]; live: boolean };
 
-export function buildDisplay(blocks: Block[], groups: Group[]): DisplayRow[] {
+export function buildDisplay(
+	blocks: Block[],
+	groups: Group[],
+	peeked: ReadonlySet<string> = new Set(),
+): DisplayRow[] {
 	const firstMember = new Map<string, Group>();
 	const memberOf = new Map<string, Group>();
 	for (const g of groups) {
@@ -44,7 +63,16 @@ export function buildDisplay(blocks: Block[], groups: Group[]): DisplayRow[] {
 		if (firstMember.get(b.id) === g) {
 			// Emit the group once, at its first member; the rest of its range is skipped below.
 			const members = g.memberIds.map((id) => byId.get(id)).filter((x): x is Block => !!x);
-			rows.push(g.folded ? { type: "group", group: g, members } : { type: "groupOpen", group: g, members });
+			if (!g.folded) {
+				// UNFOLDED — members live. folded=false always wins over peek.
+				rows.push({ type: "groupOpen", group: g, members, live: true });
+			} else if (peeked.has(g.id)) {
+				// PEEK — still folded (wire unchanged), members shown dull for preview only.
+				rows.push({ type: "groupOpen", group: g, members, live: false });
+			} else {
+				// COLLAPSED — one parent tile.
+				rows.push({ type: "group", group: g, members });
+			}
 			emitted.add(g);
 		} else if (!emitted.has(g)) {
 			// A member whose group was never emitted (its first member is absent from this
@@ -54,4 +82,40 @@ export function buildDisplay(blocks: Block[], groups: Group[]): DisplayRow[] {
 		// else: already emitted with its group → skip (it's behind/inside the parent).
 	}
 	return rows;
+}
+
+/** A run of plain/collapsed tiles that lays out as ONE uniform CSS grid. */
+export type TilesSegment = { kind: "tiles"; rows: DisplayRow[] };
+/** One OPEN group, rendered as a full-width band of natural height between grids. */
+export type BandSegment = { kind: "band"; row: Extract<DisplayRow, { type: "groupOpen" }> };
+export type DisplaySegment = TilesSegment | BandSegment;
+
+/**
+ * Split a display-row list into stacked segments so an OPEN group (`groupOpen`) never lives
+ * inside the dense tile grid. An open group's band is multi-line (parent tile + member tiles
+ * + actions) and a fixed-row CSS grid (`grid-auto-rows: var(--cell)`) would pin it to one
+ * cell-height track — its content then overflows and overlaps the next row, tearing the grid.
+ *
+ * Instead each maximal run of `block` + COLLAPSED-`group` rows becomes a `tiles` segment (one
+ * uniform grid), and every `groupOpen` row becomes its own `band` segment. The component
+ * renders the segments as a vertical stack: grid · band · grid · …, so each band gets its
+ * natural height and the surrounding tile grids stay perfectly uniform. A COLLAPSED group is a
+ * single square, so it stays INSIDE the tile grid — only open groups break the flow. Pure.
+ */
+export function segmentDisplay(rows: DisplayRow[]): DisplaySegment[] {
+	const segs: DisplaySegment[] = [];
+	let cur: DisplayRow[] | null = null;
+	for (const r of rows) {
+		if (r.type === "groupOpen") {
+			if (cur) {
+				segs.push({ kind: "tiles", rows: cur });
+				cur = null;
+			}
+			segs.push({ kind: "band", row: r });
+		} else {
+			(cur ??= []).push(r);
+		}
+	}
+	if (cur) segs.push({ kind: "tiles", rows: cur });
+	return segs;
 }
