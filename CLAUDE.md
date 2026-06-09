@@ -39,9 +39,10 @@ standalone HTML visualizer — not the focus; touch only if asked. Don't confuse
   blocks in). Exposed as `window.__store` for debugging.
   - **Protected working tail:** `protectTokens` (default `20_000`) reserves the newest
     ~N tokens of context so the auto-folder never touches recent reasoning. `protectedFromIndex`
-    walks back from the newest block summing full `tokens` and returns the index where the
-    sum first reaches `protectTokens` (blocks at that index and later are protected; always
-    at least the newest block; `0` if the whole session is smaller than the window).
+    walks back from the newest block summing full `tokens` toward that target, but refuses
+    to pull in the next older block if doing so would exceed a strict 25% whole-block
+    overflow cap (except the newest block, which is always protected even if it alone
+    exceeds the cap; `0` if the whole session fits under the target/cap).
     `isProtected(b)` and `protectedTokens` are the reads. `refold()` only builds fold
     candidates from blocks with `i < protectedFromIndex` — i.e. older than the tail. Manual
     `fold()` is also refused in the protected tail, and a folded block that later becomes

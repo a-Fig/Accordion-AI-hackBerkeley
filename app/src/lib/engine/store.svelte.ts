@@ -36,6 +36,9 @@ const FOLD_RANK: Record<BlockKind, number> = {
 	user: 4, // the instruction/intent → fold last of all
 };
 
+/** Whole-block slack allowed above `protectTokens` before the next older block is left foldable. */
+const PROTECT_OVERFLOW_CAP = 1.25;
+
 export interface LogEntry {
 	by: Actor;
 	action: string;
@@ -51,11 +54,12 @@ export class AccordionStore {
 	/** Model's total context window, as reported by pi (null until known). */
 	contextWindow = $state<number | null>(null);
 	/**
-	 * The protected working tail: the most recent blocks whose combined full size
-	 * reaches this many tokens are NEVER auto-folded. The automatic folder and the
-	 * future Conductor only ever operate on context older than this window — the
-	 * recent ~N tokens stay verbatim. Protection is absolute: manual folds are
-	 * refused there too.
+	 * The protected working tail: the most recent blocks up to this token target are
+	 * NEVER auto-folded, with a strict 25% whole-block overflow cap so a huge boundary
+	 * block cannot silently double the protected region. The newest block is always
+	 * protected even if it alone exceeds the cap. The automatic folder and the future
+	 * Conductor only ever operate on context older than this window — the recent ~N
+	 * tokens stay verbatim. Protection is absolute: manual folds are refused there too.
 	 */
 	protectTokens = $state(20_000);
 	log = $state<LogEntry[]>([]);
@@ -220,17 +224,28 @@ export class AccordionStore {
 	}
 
 	/**
-	 * Index of the first protected block. Walking back from the newest block, the
-	 * most recent blocks whose combined full size reaches `protectTokens` are
-	 * protected; blocks at this index and later are never auto-folded. Always
-	 * protects at least the newest block. Returns 0 if the whole session is
-	 * smaller than the protected window (then nothing is fold-eligible).
+	 * Index of the first protected block. Walking back from the newest block, protect
+	 * whole blocks until the target `protectTokens` is reached, but refuse to pull in
+	 * the next older block if doing so would exceed a strict 25% whole-block overflow
+	 * cap. That keeps the slider honest: 20k means roughly 20k, not 40k just because a
+	 * huge boundary block happened to cross the threshold.
+	 *
+	 * Protection remains absolute for what IS inside the tail, and we always protect at
+	 * least the newest block. Therefore a single newest block may exceed the cap by
+	 * itself — the cap only decides whether to add another older block.
 	 */
 	protectedFromIndex = $derived.by(() => {
+		if (!this.blocks.length) return 0;
+		const target = this.protectTokens;
+		const cap = target * PROTECT_OVERFLOW_CAP;
 		let sum = 0;
 		for (let i = this.blocks.length - 1; i >= 0; i--) {
-			sum += this.blocks[i].tokens;
-			if (sum >= this.protectTokens) return i;
+			const next = sum + this.blocks[i].tokens;
+			// The newest block is indivisible and always protected. For older blocks, stop
+			// before adding one that would push the protected tail beyond the overflow cap.
+			if (i < this.blocks.length - 1 && next > cap) return i + 1;
+			sum = next;
+			if (sum >= target) return i;
 		}
 		return 0;
 	});
@@ -304,7 +319,8 @@ export class AccordionStore {
 		if (live <= this.budget) return;
 
 		// 2) fold lowest-value, oldest candidates until the live context fits.
-		// Protect the recent working tail (the newest ~protectTokens of context),
+		// Protect the recent working tail (the newest ~protectTokens of context, capped
+		// to 25% whole-block overflow except for the indivisible newest block),
 		// and never fold a block whose digest wouldn't actually save tokens — folding
 		// it would only grow the live context and churn the view.
 		// Skip members of a folded group: they are already collapsed into the group's one
