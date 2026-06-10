@@ -56,8 +56,9 @@ export class AccordionStore {
 	/**
 	 * The protected working tail: the most recent blocks up to this token target are
 	 * NEVER auto-folded, with a strict 25% whole-block overflow cap so a huge boundary
-	 * block cannot silently double the protected region. The newest block is always
-	 * protected even if it alone exceeds the cap. The automatic folder and the future
+	 * block cannot silently double the protected region. When target > 0, the newest block
+	 * is always protected even if it alone exceeds the cap. When target === 0, protection
+	 * is fully disabled — all blocks are foldable. The automatic folder and the future
 	 * Conductor only ever operate on context older than this window — the recent ~N
 	 * tokens stay verbatim. Protection is absolute: manual folds are refused there too.
 	 */
@@ -237,9 +238,11 @@ export class AccordionStore {
 	protectedFromIndex = $derived.by(() => {
 		if (!this.blocks.length) return 0;
 		const target = this.protectTokens;
+		// Protection disabled: every block is foldable.
+		if (target === 0) return this.blocks.length;
 		const cap = target * PROTECT_OVERFLOW_CAP;
 		// Always absorb the newest block unconditionally — it is indivisible and the
-		// protected tail must never be empty while a session has blocks.
+		// protected tail must never be empty while target > 0.
 		let sum = this.blocks[this.blocks.length - 1].tokens;
 		if (sum >= target) return this.blocks.length - 1;
 		for (let i = this.blocks.length - 2; i >= 0; i--) {
