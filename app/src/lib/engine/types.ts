@@ -91,10 +91,11 @@ export interface Group {
 	memberIds: string[];
 	folded: boolean;
 	/**
-	 * Who created this group. `"you"` or absent ⇒ durable human group, preserved across every
-	 * conductor pass. `"auto"` or `"conductor"` ⇒ conductor-owned: cleared at the start of
-	 * each conductor pass and rebuilt from that pass's `group` commands, so a group the
-	 * conductor stops asking for is not left stranded. `createGroup` always sets it (default `"you"`).
+	 * Who created this group. `"you"` or absent ⇒ preserved (treated as human/legacy): never
+	 * touched by a conductor pass. `"auto"` or `"conductor"` ⇒ conductor-owned: cleared at the
+	 * start of each conductor pass (`clearConductorState`) and rebuilt from that pass's `group`
+	 * commands, so a group the conductor stops asking for is not left stranded. `createGroup`
+	 * always sets it (default `"you"`).
 	 */
 	by?: Actor;
 }

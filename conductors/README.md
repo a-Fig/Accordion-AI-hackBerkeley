@@ -78,8 +78,9 @@ export const IN_PROCESS_CONDUCTORS: InProcessConductor[] = [
 ];
 ```
 
-That's it. It appears in the conductor dropdown in the map header and is selectable per
-session automatically.
+That's it. It appears in the conductor dropdown in the map header. Conductor selection is
+**global** — one active conductor applies to whatever session is loaded (persisted in
+`conductorState.activeId`), not chosen per session.
 
 **The real worked example is the built-in:** [`builtin/builtin.ts`](builtin/builtin.ts) is a
 ~15-line `conduct` that does exactly this kind of budget-folding (oldest-first,
@@ -108,7 +109,8 @@ npm start        # listens on ws://127.0.0.1:7700, advertises under ~/.accordion
 ```
 
 Then open the Accordion desktop app, load a session, and pick **Recency folder** from the
-conductor dropdown in the map header.
+conductor dropdown in the map header. The selection is global — it applies to whatever
+session is currently active.
 
 ## Layout
 

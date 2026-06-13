@@ -59,6 +59,10 @@ export class RemoteRunner implements Conductor {
 
 	private ws: WebSocket | null = null;
 	private manualClose = false;
+	/** True after an UNEXPECTED socket drop (not a manual close). A dead runner can never
+	 * re-dial, so `attachConductor` must not treat it as "already correctly attached". */
+	private _dead = false;
+	get isDead(): boolean { return this._dead; }
 	/** The conductor's last desired command set; `null` until it has ever spoken (⇒ hold/raw). */
 	private desired: Command[] | null = null;
 	private wants: ContentMode = "full";
@@ -136,6 +140,7 @@ export class RemoteRunner implements Conductor {
 				// Unexpected drop: clear stale commands so conduct() returns [] (raw) rather
 				// than perpetuating the last known desired state against a dead conductor.
 				this.desired = [];
+				this._dead = true;
 				// Immediately re-run the conductor pass so the store renders raw NOW rather than
 				// waiting for the next unrelated refold. conduct() reads this.desired (now [])
 				// and returns [], which clears all conductor folds in the same tick.
@@ -182,6 +187,10 @@ export class RemoteRunner implements Conductor {
 				// against a state we already superseded — applying it would rewind decisions.
 				// If rev is absent, accept as before (backward-compatible with conductors that
 				// do not echo rev).
+				// Liveness tradeoff: a human interaction between our context/update and the
+				// conductor's reply bumps this.rev, so a slow conductor's in-flight reply is
+				// dropped as stale and it must recompute against the newer snapshot — intentional,
+				// because applying a command set computed against an old view could rewind state.
 				if (m.rev !== undefined && m.rev < this.rev) break;
 				this.desired = Array.isArray(m.commands) ? m.commands : [];
 				this.lastRev = m.rev ?? this.rev;
@@ -308,11 +317,13 @@ export function attachConductor(store: AccordionStore, id: string | null, availa
 	const norm = id ?? NONE_ID;
 	const inProc = norm === NONE_ID ? null : inProcessConductor(norm);
 	const isRemoteId = norm !== NONE_ID && !inProc;
-	// Already correctly attached? For a remote that means the live runner's id matches; for
-	// in-process/none, just the id+store. (A remote id that fell back to built-in last time has
-	// activeRemote === null, so this is false → we retry now that it may have appeared.)
+	// Already correctly attached? For a remote that means the live runner's id matches AND the
+	// runner is still alive (not dead from an unexpected drop); for in-process/none, just the
+	// id+store. (A remote id that fell back to built-in last time has activeRemote === null, so
+	// this is false → we retry now that it may have appeared. A dead runner is also false →
+	// we tear it down and re-dial so the conductor process can reconnect after a socket drop.)
 	const alreadyCorrect =
-		store === lastStore && norm === lastId && (isRemoteId ? activeRemote?.id === norm : true);
+		store === lastStore && norm === lastId && (isRemoteId ? (activeRemote?.id === norm && !activeRemote.isDead) : true);
 	if (alreadyCorrect) return;
 
 	if (activeRemote) {

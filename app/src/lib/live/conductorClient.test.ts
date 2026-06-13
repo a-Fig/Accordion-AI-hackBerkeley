@@ -278,6 +278,50 @@ describe("RemoteRunner — protocol-mismatch status survives teardown (Bug 2)", 
 	});
 });
 
+describe("attachConductor — dead runner re-dial on repeat attach (Bug 4)", () => {
+	it("creates a NEW socket when attachConductor is called again after an unexpected drop", () => {
+		const store = makeStore(2);
+		attachConductor(store, ENTRY.id, [ENTRY]);
+		const ws1 = FakeWebSocket.last!;
+		ws1.open();
+
+		// Mark the runner dead via an unexpected socket close (no runner.close() beforehand).
+		ws1.onclose?.();
+
+		// The runner should now be flagged dead.
+		expect(conductorLink.status).toBe("error");
+
+		// Calling attachConductor again with the same id+entry must NOT short-circuit:
+		// the dead runner must be torn down and a new socket dialed.
+		attachConductor(store, ENTRY.id, [ENTRY]);
+		const ws2 = FakeWebSocket.last!;
+
+		// A new socket must have been created — not the same stale one.
+		expect(ws2).not.toBe(ws1);
+
+		// Clean up.
+		attachConductor(store, "builtin", []);
+	});
+
+	it("a MANUAL close does NOT set dead — a repeat attach of a different id stays a normal no-op via lastId guard", () => {
+		const store = makeStore(2);
+		attachConductor(store, ENTRY.id, [ENTRY]);
+		const ws1 = FakeWebSocket.last!;
+		ws1.open();
+
+		// Manually switch away — this calls runner.close() which must NOT set _dead.
+		attachConductor(store, "builtin", []);
+
+		// Switch back to the remote entry: a fresh runner (new socket) is created.
+		attachConductor(store, ENTRY.id, [ENTRY]);
+		const ws2 = FakeWebSocket.last!;
+		expect(ws2).not.toBe(ws1);
+
+		// Clean up.
+		attachConductor(store, "builtin", []);
+	});
+});
+
 describe("RemoteRunner — stale desired cleared on unexpected disconnect (Bug 3)", () => {
 	it("clears to raw (conduct returns []) after an unexpected socket close", () => {
 		const store = makeStore(3);

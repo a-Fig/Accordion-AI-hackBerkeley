@@ -163,8 +163,8 @@ Two ways:
 
 **1. Advertise a registry file** (local conductors — auto-discovered). Write a JSON file
 at `~/.accordion/conductors/<id>.json` matching the `ConductorEntry` shape, refresh it on a
-heartbeat (Accordion treats an entry older than 15 s as dead and reaps it), and delete it on
-shutdown. The fields (see `registry.ts`):
+heartbeat (Accordion treats an entry older than 15 s as offline and hides it from the
+conductor list — the descriptor file is not deleted), and delete it on shutdown. The fields (see `registry.ts`):
 
 | field              | type     | meaning                                                     |
 |--------------------|----------|-------------------------------------------------------------|
