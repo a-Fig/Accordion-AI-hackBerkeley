@@ -124,6 +124,17 @@ export function digestTokens(b: Block): number {
 	return out;
 }
 
+/**
+ * Token cost of a conductor's substituted content (ADR 0007 — `Block.subst`). Unlike
+ * `digest()` this is arbitrary, mutable text the conductor chose, so it is NOT cached on
+ * the block (the same id may carry different substitutions over a session). Same
+ * estimate + per-block overhead as a digest so accounting is apples-to-apples; `""`
+ * (the "delete" form) costs only the structural overhead.
+ */
+export function substTokens(content: string): number {
+	return estTokens(content) + BLOCK_OVERHEAD;
+}
+
 // ── multiblock folds (ADR 0006) ──────────────────────────────────────────────
 // A GROUP collapses a contiguous run of blocks into ONE entry. Its summary is the
 // single source of truth for both what the GUI's parent tile renders and what the

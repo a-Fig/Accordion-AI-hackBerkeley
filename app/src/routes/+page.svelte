@@ -4,6 +4,9 @@
 	import { connectLive, disconnectLive, live } from "$lib/live/liveClient.svelte";
 	import { discovery, startDiscovery, stopDiscovery, selectSession, DEMO_ID } from "$lib/live/discovery.svelte";
 	import { claudeDiscovery, startClaudeDiscovery, stopClaudeDiscovery, selectClaude } from "$lib/live/claudeDiscovery.svelte";
+	import { conductorState, setActiveConductor } from "$lib/live/conductor.svelte";
+	import { startConductorDiscovery, stopConductorDiscovery, allConductors } from "$lib/live/conductorDiscovery.svelte";
+	import { attachConductor } from "$lib/live/conductorClient.svelte";
 	import { DEFAULT_PORT } from "$lib/live/protocol";
 	import type { SessionEntry } from "$lib/live/registry";
 	import type { ClaudeCodeSession } from "$lib/live/claude";
@@ -29,6 +32,25 @@
 	$effect(() => {
 		if (isTauriEnv && source === "claude") startClaudeDiscovery();
 		else stopClaudeDiscovery();
+	});
+
+	// ── Conductors (ADR 0007) ──────────────────────────────────────────────
+	// External conductors to offer in the switcher (discovered + configured). The built-in
+	// and "Raw" entries are added by the sidebar itself. Reactive so newly-found conductors
+	// appear without a reload.
+	const conductors = $derived(allConductors());
+
+	// Attach the selected conductor to the active session's store. Tracks the store, the
+	// selection, AND the available list — so a conductor selected before discovery found it
+	// (e.g. a remote id restored from localStorage on launch) gets attached once it appears.
+	// `attachConductor` is idempotent, so a poll refreshing the list when we're already
+	// correctly attached is a no-op (no reconnect churn).
+	$effect(() => {
+		const store = session.store;
+		const activeId = conductorState.activeId;
+		const list = conductors;
+		if (!store) return;
+		attachConductor(store, activeId, list);
 	});
 
 	const selectedBlock = $derived(
@@ -87,9 +109,11 @@
 
 	onMount(() => {
 		startDiscovery(onFocusRequest);
+		startConductorDiscovery();
 		return () => {
 			stopDiscovery();
 			stopClaudeDiscovery();
+			stopConductorDiscovery();
 			disconnectLive();
 		};
 	});
@@ -117,6 +141,9 @@
 			claudeSessions={claudeDiscovery.sessions}
 			claudeSelected={claudeDiscovery.selected}
 			onselectclaude={selectClaudeSession}
+			conductor={conductorState.activeId}
+			{conductors}
+			onconductor={setActiveConductor}
 		/>
 	{/if}
 

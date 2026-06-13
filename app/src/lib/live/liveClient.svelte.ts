@@ -15,6 +15,7 @@ import { AccordionStore } from "../engine/store.svelte";
 import { wireToBlock } from "./mapping";
 import { computeFoldOps, computeGroupOps, resolveUnfold } from "./plan";
 import { folding } from "./folding.svelte";
+import { activeRemoteRunner } from "./conductorClient.svelte";
 import { DEFAULT_PORT, PROTOCOL_VERSION, isServerMessage, type ServerMessage, type PlanMessage, type FoldOp, type GroupOp, type UnfoldResultMessage } from "./protocol";
 import { ghostStart, ghostEnd, ghostClearAll } from "./ghostState.svelte";
 
@@ -168,6 +169,14 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 			// override then would silently leak a block from the budget on the next arm.
 			const { restored, missing } =
 				folding.enabled && session.store ? resolveUnfold(session.store, codes) : { restored: [], missing: codes };
+			// Tell an attached remote conductor that the agent pulled blocks back to full — it
+			// didn't initiate this, and may want to adapt (ADR 0007 host/event). Fire-and-forget.
+			if (restored.length)
+				activeRemoteRunner()?.notifyEvent(
+					"agentUnfold",
+					restored.map((r) => r.code),
+					`agent unfolded ${restored.length} block(s)`,
+				);
 			const reply: UnfoldResultMessage = { type: "unfoldResult", reqId: msg.reqId, restored, missing };
 			try {
 				ws.send(JSON.stringify(reply));

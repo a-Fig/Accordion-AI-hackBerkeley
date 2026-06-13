@@ -11,9 +11,11 @@
  * tool_results before thinking before reply text before tool_calls before user
  * intent. Deterministic and explainable; the smarts come later.
  */
-import type { Block, BlockKind, Actor, SessionMeta, ParsedSession, Group } from "./types";
-import { digest, digestTokens, groupDigest, groupDigestTokens } from "./digest";
+import type { Block, Actor, SessionMeta, ParsedSession, Group } from "./types";
+import { digest, digestTokens, groupDigest, groupDigestTokens, substTokens } from "./digest";
 import { messageKey } from "./ids";
+import type { Conductor, ContextSnapshot, Command, ClampReport, ClampReason } from "./conductor";
+import { BuiltinConductor } from "./conductor.builtin";
 
 /** Classification of a folded group's members for accounting + the wire (ADR 0006 §4/§5). */
 interface GroupShape {
@@ -27,14 +29,9 @@ interface GroupShape {
 	carrier: string | null;
 }
 
-/** Lower value → folded sooner. The whole asymmetry the tool is built around. */
-const FOLD_RANK: Record<BlockKind, number> = {
-	tool_result: 0, // huge, decays fastest → fold first, hardest
-	thinking: 1, // ephemeral reasoning
-	text: 2, // conclusions, medium durable value
-	tool_call: 3, // tiny + durable record of an action → fold last
-	user: 4, // the instruction/intent → fold last of all
-};
+// The fold-ranking (which kinds fold first) moved to `conductor.builtin.ts` — it is the
+// built-in conductor's STRATEGY, not an engine constant. The store now only enforces
+// provider-validity and applies whatever conductor is attached (ADR 0007).
 
 /** Whole-block slack allowed above `protectTokens` before the next older block is left foldable. */
 const PROTECT_OVERFLOW_CAP = 1.25;
@@ -82,11 +79,53 @@ export class AccordionStore {
 	 */
 	private index = new Map<string, number>();
 
+	/**
+	 * The active context-management strategy (ADR 0007). Defaults to the built-in folder
+	 * so a freshly loaded session behaves EXACTLY as before the seam existed. `attach(c)`
+	 * swaps it; `detach()` (or `attach(null)`) makes the context raw — the store never
+	 * invents a strategy of its own, it only runs the one attached.
+	 */
+	conductor = $state<Conductor | null>(new BuiltinConductor());
+	/**
+	 * The last command batch the active conductor asked for. When a conductor returns
+	 * `null` ("hold") — e.g. a remote one still computing — the store re-applies this to
+	 * the (possibly grown) context, so prior decisions persist and only new blocks arrive
+	 * raw. Reset to `[]` whenever a conductor is detached.
+	 */
+	private lastCmds: Command[] = [];
+	/** Re-entrancy latch: a command that itself re-folds (e.g. `group`) must not recurse. */
+	private conducting = false;
+	/**
+	 * ClampReports from the most recent conductor pass — what the host had to clamp to the
+	 * validity floor. A remote runner reads this after triggering a pass to feed
+	 * `host/commandResult` back to its conductor. Empty after a clean pass (the built-in
+	 * never trips a clamp).
+	 */
+	lastReports = $state<ClampReport[]>([]);
+	/**
+	 * Optional observer the live layer sets so an attached remote conductor is told when the
+	 * HUMAN overrides by hand (pin / fold / unfold / unpin / reset) — the `host/event:
+	 * humanOverride` half of ADR 0007. Kept as a plain callback so the engine never imports
+	 * the wire layer. Only ever fired for human ("you") actions; null ⇒ nobody is listening.
+	 */
+	onHumanOverride: ((ids: string[], action: string) => void) | null = null;
+
 	constructor(parsed: ParsedSession) {
 		this.meta = parsed.meta;
 		this.blocks = parsed.blocks;
 		this.reindex();
 		this.refold();
+	}
+
+	/** Swap the active conductor and immediately recompute the view. `null` ⇒ raw. */
+	attach(c: Conductor | null): void {
+		this.conductor = c;
+		this.lastCmds = [];
+		this.refold();
+	}
+	/** Detach any conductor: the context returns to raw, fully un-substituted. */
+	detach(): void {
+		this.attach(null);
 	}
 
 	private reindex(): void {
@@ -109,10 +148,15 @@ export class AccordionStore {
 		// (carrier holds the one summary's tokens; other collapsed members hold 0).
 		const w = this.groupWire.get(b.id);
 		if (w) return w.tokens;
-		return this.isFolded(b) ? digestTokens(b) : b.tokens;
+		if (!this.isFolded(b)) return b.tokens;
+		// Folded: a conductor's substitution (incl. "" = delete) costs its own length;
+		// otherwise the engine's per-kind digest.
+		return b.subst !== undefined ? substTokens(b.subst) : digestTokens(b);
 	}
+	/** What a folded block renders / the agent receives: the conductor's substitution if any,
+	 * else the engine's per-kind digest (which carries the `{#code FOLDED}` recovery tag). */
 	digestOf(b: Block): string {
-		return digest(b);
+		return b.subst ?? digest(b);
 	}
 
 	// These aggregates are read many times per render (the header alone reads several
@@ -273,10 +317,6 @@ export class AccordionStore {
 
 	// ---- the automatic folder ---------------------------------------------
 	/**
-	 * Recompute every auto-controlled block from scratch so the live context fits
-	 * the budget. Idempotent: same blocks + budget + overrides → same result.
-	 */
-	/**
 	 * Dissolve any group that has come to reach into the protected tail (ADR 0006 watch
 	 * item). Groups are created entirely older than the tail, but widening `protectTokens`
 	 * can later grow the tail over an existing group. Protection is absolute, so rather than
@@ -294,53 +334,196 @@ export class AccordionStore {
 		if (kept.length !== this.groups.length) this.groups = kept;
 	}
 
+	/**
+	 * Recompute the conductor-controlled view from scratch so the live context reflects
+	 * the active strategy. Idempotent: same blocks + budget + overrides + conductor →
+	 * same result. Named `refold` for history and for the ~30 callers that already invoke
+	 * it; it now delegates to whatever conductor is attached (the built-in folder by
+	 * default, or none ⇒ raw).
+	 */
 	refold(): void {
-		// A group can never overlap the protected tail; drop any that now does (e.g. the
-		// tail was widened over it) before anything reads group state this pass.
-		this.pruneProtectedGroups();
-		// Compute the protected boundary once; folding never changes a block's full
-		// `tokens`, so this index is stable for the whole pass.
-		const protectedFrom = this.protectedFromIndex;
+		this.runConductor();
+	}
 
-		// 1) Reset auto-controlled blocks to full, AND heal any protected block that
-		// is still folded by a manual override. Protection is ABSOLUTE: a block in the
-		// working tail is never folded, by the auto-folder OR the user. This also
-		// self-corrects a block that became protected after being folded (e.g. the
-		// tail grew via setProtect) — it springs back to live.
+	/**
+	 * One conductor pass (ADR 0007). The shape mirrors the pre-seam `refold` exactly so
+	 * the built-in stays byte-identical, but the fold DECISION now lives in the conductor:
+	 *
+	 *   1. prune groups that reach into the protected tail (engine invariant);
+	 *   2. heal a manual fold the protected tail has grown over (engine invariant);
+	 *   3. clear conductor-owned state → the baseline the conductor folds down FROM;
+	 *   4. ask the conductor for its desired command set;
+	 *   5. apply it, clamping each command to provider-validity.
+	 *
+	 * Non-reentrant: a `group` command routes through `createGroup`, which calls `refold`
+	 * again — the latch makes that inner call a no-op so the outer pass owns the result.
+	 */
+	private runConductor(): void {
+		if (this.conducting) return;
+		this.conducting = true;
+		try {
+			// A group can never overlap the protected tail; drop any that now does (e.g. the
+			// tail was widened over it) before anything reads group state this pass.
+			this.pruneProtectedGroups();
+			// Compute the protected boundary once; folding never changes a block's full
+			// `tokens`, so this index is stable for the whole pass.
+			const protectedFrom = this.protectedFromIndex;
+
+			// Engine invariant — protection is ABSOLUTE: a block in the working tail is never
+			// folded, by a conductor OR the user. Heal a manual fold the tail has grown over
+			// (e.g. the tail widened via setProtect) so it springs back to live.
+			this.healProtected(protectedFrom);
+			// Reset conductor-owned state to the raw baseline (human overrides + groups still
+			// apply); the snapshot's liveTokens is then exactly what the conductor folds down from.
+			this.clearConductorState();
+			this.version++;
+
+			// Ask the active conductor for its complete desired state. `null` ⇒ hold the last
+			// applied batch (a remote one still thinking); `[]` ⇒ clear to raw; no conductor ⇒ raw.
+			let result: Command[] | null;
+			try {
+				result = this.conductor ? this.conductor.conduct(this.snapshot(protectedFrom)) : [];
+			} catch (e) {
+				// A misbehaving (e.g. untrusted remote) conductor must never wedge the store or
+				// abort the live model-call path. Hold the last applied state and surface the error.
+				result = null;
+				this.emit("conductor", "conductor error", e instanceof Error ? e.message : String(e));
+			}
+			const cmds = result === null ? this.lastCmds : result;
+			// The built-in folds as the old auto-folder did (`by: "auto"`, silent); any other
+			// conductor is attributed to "conductor" and its activity is surfaced in the log.
+			const by: Actor = this.conductor && this.conductor.id !== "builtin" ? "conductor" : "auto";
+			const reports = this.applyCommands(cmds, by);
+			this.lastReports = reports;
+			if (result !== null) this.lastCmds = cmds;
+
+			if (by === "conductor") {
+				const n = countAffected(cmds);
+				if (n) this.emit("conductor", "conducted", `${n} block${n === 1 ? "" : "s"}`);
+			}
+			for (const r of reports) this.emit(by, `clamped · ${r.reason}`, r.detail);
+		} finally {
+			this.conducting = false;
+		}
+	}
+
+	/** Engine invariant: force-unfold any manual fold that now sits in the protected tail. */
+	private healProtected(protectedFrom: number): void {
 		this.blocks.forEach((b, i) => {
 			if (i >= protectedFrom && b.override === "folded") {
-				// Protection is absolute, but do not silently erase the user intent - log the
+				// Protection is absolute, but do not silently erase the user intent — log the
 				// forced unfold so the activity feed shows what happened.
 				this.emit(b.by ?? "auto", "unfolded (protected)", label(b));
 				b.override = null;
 				b.by = null;
 			}
+		});
+	}
+
+	/**
+	 * Clear everything a conductor owns (`autoFolded`, `subst`, and an `auto`/`conductor`
+	 * attribution) on blocks the human has NOT overridden — returning them to full, live
+	 * content. Human overrides (pin / manual fold / manual unfold) and folded groups are
+	 * left untouched; they are not the conductor's to reset.
+	 */
+	private clearConductorState(): void {
+		for (const b of this.blocks) {
 			if (b.override === null) {
 				b.autoFolded = false;
-				if (b.by === "auto") b.by = null;
+				b.subst = undefined;
+				if (b.by === "auto" || b.by === "conductor") b.by = null;
 			}
-		});
-		this.version++;
-		let live = this.liveTokens;
-		if (live <= this.budget) return;
-
-		// 2) fold lowest-value, oldest candidates until the live context fits.
-		// Protect the recent working tail (the newest ~protectTokens of context, capped
-		// to 25% whole-block overflow except for the indivisible newest block),
-		// and never fold a block whose digest wouldn't actually save tokens — folding
-		// it would only grow the live context and churn the view.
-		// Skip members of a folded group: they are already collapsed into the group's one
-		// entry, so folding them individually would double-count against the group accounting.
-		const cand = this.blocks
-			.filter((b, i) => b.override === null && i < protectedFrom && !this.groupWire.has(b.id) && digestTokens(b) < b.tokens)
-			.sort((a, b) => FOLD_RANK[a.kind] - FOLD_RANK[b.kind] || a.order - b.order);
-
-		for (const b of cand) {
-			if (live <= this.budget) break;
-			b.autoFolded = true;
-			b.by = "auto";
-			live += digestTokens(b) - b.tokens;
 		}
+	}
+
+	/** A read-only snapshot for the conductor. Taken AFTER the reset, so `liveTokens` is the baseline. */
+	private snapshot(protectedFrom: number): ContextSnapshot {
+		return {
+			blocks: this.blocks,
+			budget: this.budget,
+			contextWindow: this.contextWindow,
+			liveTokens: this.liveTokens,
+			protectedFromIndex: protectedFrom,
+			protectTokens: this.protectTokens,
+			isInFoldedGroup: (id) => this.groupWire.has(id),
+		};
+	}
+
+	/**
+	 * Apply a conductor's command batch to the (already-cleared) baseline. This is the
+	 * ONE place the host enforces its single floor — provider-validity — by clamping:
+	 * every command is content substitution (a block is never removed, so a tool pair
+	 * never orphans), a human override always wins, and a grouped block is left to its
+	 * group. Returns one ClampReport per command it could not apply verbatim — never
+	 * throws, never silently drops. Public for tests and the remote runner; production
+	 * always reaches it through `runConductor` (which does the reset first).
+	 */
+	applyCommands(cmds: Command[], by: Actor): ClampReport[] {
+		const reports: ClampReport[] = [];
+		for (const c of cmds) {
+			switch (c.kind) {
+				case "fold":
+					for (const id of c.ids) this.substOne(id, c.digest, by, "fold", reports);
+					break;
+				case "replace":
+					this.substOne(c.id, c.content, by, "replace", reports);
+					break;
+				case "restore":
+				case "pin":
+					for (const id of c.ids) this.liveOne(id, by, c.kind, reports);
+					break;
+				case "group":
+					this.groupCmd(c.ids, by, reports);
+					break;
+			}
+		}
+		return reports;
+	}
+
+	/**
+	 * Fold/replace one block by content substitution. `content === undefined` (a fold with
+	 * no digest) marks it folded via the engine digest — byte-identical to the old
+	 * auto-folder; a string (incl. "") substitutes that exact content.
+	 */
+	private substOne(id: string, content: string | undefined, by: Actor, kind: "fold" | "replace", reports: ClampReport[]): void {
+		const b = this.get(id);
+		if (!b) return void reports.push(clamp(kind, [id], "unknown-id", `no block ${id}`));
+		if (b.override !== null) return void reports.push(clamp(kind, [id], "human-override", `${label(b)} is held by the human`));
+		if (this.groupWire.has(id)) return void reports.push(clamp(kind, [id], "grouped", `${label(b)} is inside a folded group`));
+		b.autoFolded = true;
+		b.subst = content;
+		b.by = by;
+	}
+
+	/** Force a block back to full, live content (restore/pin). No-op if already live. */
+	private liveOne(id: string, by: Actor, kind: "restore" | "pin", reports: ClampReport[]): void {
+		const b = this.get(id);
+		if (!b) return void reports.push(clamp(kind, [id], "unknown-id", `no block ${id}`));
+		if (b.override !== null) return void reports.push(clamp(kind, [id], "human-override", `${label(b)} is held by the human`));
+		if (this.groupWire.has(id)) return void reports.push(clamp(kind, [id], "grouped", `${label(b)} is inside a folded group`));
+		if (!b.autoFolded && b.subst === undefined) return; // already live — silent no-op
+		b.autoFolded = false;
+		b.subst = undefined;
+		if (b.by === "auto" || b.by === "conductor") b.by = null;
+	}
+
+	/**
+	 * Apply a `group` command by reusing the human group machinery (contiguous, ≥2,
+	 * ungrouped, older than the tail). Human always wins: if SNAPPING the range would sweep
+	 * a human-held block (pinned / manually folded / manually unfolded) into the collapse,
+	 * refuse the whole group and report it — never silently override the human's choice.
+	 * (Human-initiated groups go straight through `createGroup` and keep their old freedom.)
+	 */
+	private groupCmd(ids: string[], by: Actor, reports: ClampReport[]): void {
+		if (ids.length < 2) return void reports.push(clamp("group", ids, "invalid-group", "a group needs ≥2 blocks"));
+		const range = this.snappedRange(ids[0], ids[ids.length - 1]);
+		if (range) {
+			const held = range.filter((id) => this.get(id)?.override != null);
+			if (held.length)
+				return void reports.push(clamp("group", ids, "human-override", `would collapse ${held.length} human-held block(s)`));
+		}
+		const g = this.createGroup(ids[0], ids[ids.length - 1], by);
+		if (!g) reports.push(clamp("group", ids, "invalid-group", "not a valid contiguous, ungrouped run older than the protected tail"));
 	}
 
 	setBudget(n: number): void {
@@ -409,16 +592,22 @@ export class AccordionStore {
 		if (this.isProtected(b)) return;
 		b.override = "folded";
 		b.by = by;
+		// The human is taking control: drop any conductor substitution so this folds to the
+		// engine digest (with its {#code FOLDED} recovery tag), not stale conductor text.
+		b.subst = undefined;
 		this.emit(by, "folded", label(b));
 		this.refold();
+		if (by === "you") this.onHumanOverride?.([id], "folded");
 	}
 	unfold(id: string, by: Actor = "you"): void {
 		const b = this.get(id);
 		if (!b || this.inFoldedGroup(id)) return;
 		b.override = "unfolded";
 		b.by = by;
+		b.subst = undefined; // human override clears conductor-owned content
 		this.emit(by, "unfolded", label(b));
 		this.refold();
+		if (by === "you") this.onHumanOverride?.([id], "unfolded");
 	}
 	toggle(id: string, by: Actor = "you"): void {
 		const b = this.get(id);
@@ -430,8 +619,10 @@ export class AccordionStore {
 		if (!b || this.inFoldedGroup(id)) return;
 		b.override = "pinned";
 		b.by = "you";
+		b.subst = undefined; // human override clears conductor-owned content
 		this.emit("you", "pinned", label(b));
 		this.refold();
+		this.onHumanOverride?.([id], "pinned");
 	}
 	unpin(id: string): void {
 		const b = this.get(id);
@@ -440,6 +631,7 @@ export class AccordionStore {
 		b.by = "you";
 		this.emit("you", "unpinned", label(b));
 		this.refold();
+		this.onHumanOverride?.([id], "unpinned");
 	}
 	/** Hand a block back to the automatic folder. */
 	auto(id: string): void {
@@ -457,6 +649,8 @@ export class AccordionStore {
 		}
 		this.emit("you", "reset", "all blocks to auto");
 		this.refold();
+		// Empty id list = "everything changed"; the conductor reconciles from the next update.
+		this.onHumanOverride?.([], "reset");
 	}
 
 	// ---- group actions (multiblock folds, ADR 0006) -----------------------
@@ -507,29 +701,39 @@ export class AccordionStore {
 	}
 
 	/**
+	 * The member ids a group over [startId, endId] would cover, after SNAPPING outward to
+	 * whole messages (a group never splits an assistant message's parts). Null if either id
+	 * is unknown. Pure — no validation, no mutation; shared by `createGroup` and the
+	 * conductor's `group` command so both reason over the exact same final range.
+	 */
+	private snappedRange(startId: string, endId: string): string[] | null {
+		const i0 = this.index.get(startId);
+		const i1 = this.index.get(endId);
+		if (i0 === undefined || i1 === undefined) return null;
+		let lo = Math.min(i0, i1);
+		let hi = Math.max(i0, i1);
+		const keyLo = messageKey(this.blocks[lo].id);
+		while (lo > 0 && messageKey(this.blocks[lo - 1].id) === keyLo) lo--;
+		const keyHi = messageKey(this.blocks[hi].id);
+		while (hi < this.blocks.length - 1 && messageKey(this.blocks[hi + 1].id) === keyHi) hi++;
+		const ids: string[] = [];
+		for (let i = lo; i <= hi; i++) ids.push(this.blocks[i].id);
+		return ids;
+	}
+
+	/**
 	 * Create a group from a block range (the human's selection, any two member ids). The
 	 * range is SNAPPED outward to whole messages (never splits an assistant message's parts),
 	 * then validated: entirely older than the protected tail, no member already grouped
 	 * (no overlap), ≥2 members. Folds it on creation. Returns the group, or null if invalid.
 	 */
 	createGroup(startId: string, endId: string, by: Actor = "you"): Group | null {
-		const i0 = this.index.get(startId);
-		const i1 = this.index.get(endId);
-		if (i0 === undefined || i1 === undefined) return null;
-		let lo = Math.min(i0, i1);
-		let hi = Math.max(i0, i1);
-		// Snap to whole messages so a group never collapses a message's parts in half.
-		const keyLo = messageKey(this.blocks[lo].id);
-		while (lo > 0 && messageKey(this.blocks[lo - 1].id) === keyLo) lo--;
-		const keyHi = messageKey(this.blocks[hi].id);
-		while (hi < this.blocks.length - 1 && messageKey(this.blocks[hi + 1].id) === keyHi) hi++;
+		const memberIds = this.snappedRange(startId, endId);
+		if (!memberIds) return null;
 		// Never reach into the protected tail (ADR 0006 §1).
-		if (hi >= this.protectedFromIndex) return null;
-		const memberIds: string[] = [];
-		for (let i = lo; i <= hi; i++) {
-			const b = this.blocks[i];
-			if (this.groupAt.get(b.id)) return null; // overlap with an existing group
-			memberIds.push(b.id);
+		if ((this.index.get(memberIds[memberIds.length - 1]) ?? Infinity) >= this.protectedFromIndex) return null;
+		for (const id of memberIds) {
+			if (this.groupAt.get(id)) return null; // overlap with an existing group
 		}
 		if (memberIds.length < 2) return null;
 		const g: Group = { id: `g:${memberIds[0]}`, memberIds, folded: true };
@@ -582,4 +786,16 @@ export class AccordionStore {
 function label(b: Block): string {
 	const where = b.turn > 0 ? `turn ${b.turn}` : "preamble";
 	return b.toolName ? `${b.kind} ${b.toolName} · ${where}` : `${b.kind} · ${where}`;
+}
+
+/** Build a ClampReport (host clamped a command to the validity floor instead of dropping it). */
+function clamp(command: Command["kind"], ids: string[], reason: ClampReason, detail: string): ClampReport {
+	return { command, ids, reason, detail };
+}
+
+/** How many blocks a command batch touches — for the activity log summary. */
+function countAffected(cmds: Command[]): number {
+	let n = 0;
+	for (const c of cmds) n += c.kind === "replace" ? 1 : c.ids.length;
+	return n;
 }

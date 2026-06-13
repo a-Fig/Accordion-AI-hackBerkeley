@@ -80,6 +80,32 @@ fn list_sessions() -> Vec<Value> {
     out
 }
 
+/// Read every conductor descriptor. Returns raw JSON values; the app validates the
+/// protocol/staleness (registry.ts `isLiveConductor`) so the rules live in one place.
+#[tauri::command]
+fn list_conductors() -> Vec<Value> {
+    let mut out = Vec::new();
+    let Some(root) = registry_root() else {
+        return out;
+    };
+    let dir = root.join("conductors");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(text) = fs::read_to_string(&path) {
+            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                out.push(value);
+            }
+        }
+    }
+    out
+}
+
 /// Delete a stale/dead session descriptor (the app reaps when a heartbeat lapses).
 #[tauri::command]
 fn reap_session(session_id: String) -> bool {
@@ -405,6 +431,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             list_sessions,
+            list_conductors,
             reap_session,
             take_focus_request,
             focus_window,
