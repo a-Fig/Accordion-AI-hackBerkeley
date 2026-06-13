@@ -232,3 +232,39 @@ describe("conductor seam — hold last state (null)", () => {
 		expect(s.isFolded(s.get("m9:p0")!)).toBe(false); // new content arrives raw
 	});
 });
+
+describe("conductor seam — human takeover clears conductor substitution", () => {
+	it("a human fold drops stale conductor text and restores the engine digest + recovery tag", () => {
+		const s = makeStore(Array.from({ length: 3 }, (_, i) => blk(i)));
+		s.setProtect(0);
+		const stub = new StubConductor();
+		stub.cmds = [{ kind: "replace", id: "m0:p0", content: "STALE-CONDUCTOR-TEXT" }];
+		s.attach(stub);
+		expect(s.digestOf(s.get("m0:p0")!)).toBe("STALE-CONDUCTOR-TEXT");
+
+		s.fold("m0:p0"); // human takes control of the same block
+		const b = s.get("m0:p0")!;
+		expect(b.override).toBe("folded");
+		expect(b.subst).toBeUndefined(); // conductor substitution cleared
+		expect(s.digestOf(b)).toContain("FOLDED"); // engine digest with {#code FOLDED} recovery tag
+		expect(s.digestOf(b)).not.toBe("STALE-CONDUCTOR-TEXT");
+	});
+});
+
+describe("conductor seam — humanOverride notification", () => {
+	it("fires onHumanOverride for human actions but never for agent-provenance ones", () => {
+		const s = makeStore(Array.from({ length: 3 }, (_, i) => blk(i)));
+		s.setProtect(0);
+		const calls: { ids: string[]; action: string }[] = [];
+		s.onHumanOverride = (ids, action) => calls.push({ ids, action });
+
+		s.pin("m0:p0");
+		s.fold("m1:p0");
+		s.unfold("m2:p0", "agent"); // agent provenance — must NOT notify a conductor of a "human" override
+
+		expect(calls).toEqual([
+			{ ids: ["m0:p0"], action: "pinned" },
+			{ ids: ["m1:p0"], action: "folded" },
+		]);
+	});
+});

@@ -102,6 +102,13 @@ export class AccordionStore {
 	 * never trips a clamp).
 	 */
 	lastReports = $state<ClampReport[]>([]);
+	/**
+	 * Optional observer the live layer sets so an attached remote conductor is told when the
+	 * HUMAN overrides by hand (pin / fold / unfold / unpin / reset) — the `host/event:
+	 * humanOverride` half of ADR 0007. Kept as a plain callback so the engine never imports
+	 * the wire layer. Only ever fired for human ("you") actions; null ⇒ nobody is listening.
+	 */
+	onHumanOverride: ((ids: string[], action: string) => void) | null = null;
 
 	constructor(parsed: ParsedSession) {
 		this.meta = parsed.meta;
@@ -585,16 +592,22 @@ export class AccordionStore {
 		if (this.isProtected(b)) return;
 		b.override = "folded";
 		b.by = by;
+		// The human is taking control: drop any conductor substitution so this folds to the
+		// engine digest (with its {#code FOLDED} recovery tag), not stale conductor text.
+		b.subst = undefined;
 		this.emit(by, "folded", label(b));
 		this.refold();
+		if (by === "you") this.onHumanOverride?.([id], "folded");
 	}
 	unfold(id: string, by: Actor = "you"): void {
 		const b = this.get(id);
 		if (!b || this.inFoldedGroup(id)) return;
 		b.override = "unfolded";
 		b.by = by;
+		b.subst = undefined; // human override clears conductor-owned content
 		this.emit(by, "unfolded", label(b));
 		this.refold();
+		if (by === "you") this.onHumanOverride?.([id], "unfolded");
 	}
 	toggle(id: string, by: Actor = "you"): void {
 		const b = this.get(id);
@@ -606,8 +619,10 @@ export class AccordionStore {
 		if (!b || this.inFoldedGroup(id)) return;
 		b.override = "pinned";
 		b.by = "you";
+		b.subst = undefined; // human override clears conductor-owned content
 		this.emit("you", "pinned", label(b));
 		this.refold();
+		this.onHumanOverride?.([id], "pinned");
 	}
 	unpin(id: string): void {
 		const b = this.get(id);
@@ -616,6 +631,7 @@ export class AccordionStore {
 		b.by = "you";
 		this.emit("you", "unpinned", label(b));
 		this.refold();
+		this.onHumanOverride?.([id], "unpinned");
 	}
 	/** Hand a block back to the automatic folder. */
 	auto(id: string): void {
@@ -633,6 +649,8 @@ export class AccordionStore {
 		}
 		this.emit("you", "reset", "all blocks to auto");
 		this.refold();
+		// Empty id list = "everything changed"; the conductor reconciles from the next update.
+		this.onHumanOverride?.([], "reset");
 	}
 
 	// ---- group actions (multiblock folds, ADR 0006) -----------------------

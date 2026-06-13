@@ -6,8 +6,7 @@
  * AVAILABLE list lives in `conductorDiscovery.svelte.ts`; the actual attach/detach is
  * `conductorClient.attachConductor`. This module just remembers the pick.
  */
-import { BUILTIN_ID, NONE_ID } from "./conductorClient.svelte";
-import { allConductors } from "./conductorDiscovery.svelte";
+import { BUILTIN_ID } from "./conductorClient.svelte";
 
 const KEY = "accordion.conductor.active";
 
@@ -24,20 +23,6 @@ export function setActiveConductor(id: string): void {
 			/* storage blocked — selection just won't persist */
 		}
 	}
-}
-
-/** Human-facing label for the active conductor, resolved against the available list. */
-export function activeConductorLabel(): string {
-	const id = conductorState.activeId;
-	if (id === BUILTIN_ID) return "Built-in";
-	if (id === NONE_ID) return "Raw";
-	return allConductors().find((c) => c.id === id)?.label ?? "Built-in";
-}
-
-/** True when the active conductor is an external (remote) one — drives the header status dot. */
-export function activeConductorIsRemote(): boolean {
-	const id = conductorState.activeId;
-	return id !== BUILTIN_ID && id !== NONE_ID;
 }
 
 function load(): string {

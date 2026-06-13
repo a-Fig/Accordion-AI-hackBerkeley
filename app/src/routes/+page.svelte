@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount, untrack } from "svelte";
+	import { onMount } from "svelte";
 	import { session, isTauriEnv, loadSample, openFile, loadFilePath } from "$lib/session.svelte.ts";
 	import { connectLive, disconnectLive, live } from "$lib/live/liveClient.svelte";
 	import { discovery, startDiscovery, stopDiscovery, selectSession, DEMO_ID } from "$lib/live/discovery.svelte";
@@ -40,15 +40,17 @@
 	// appear without a reload.
 	const conductors = $derived(allConductors());
 
-	// Attach the selected conductor to the active session's store. Deliberately reacts ONLY
-	// to the store and the selection — NOT to the `conductors` list — so a discovery poll
-	// refreshing that list every few seconds never tears down and reconnects a live remote
-	// conductor. We read the list untracked at attach time to resolve a remote id → endpoint.
+	// Attach the selected conductor to the active session's store. Tracks the store, the
+	// selection, AND the available list — so a conductor selected before discovery found it
+	// (e.g. a remote id restored from localStorage on launch) gets attached once it appears.
+	// `attachConductor` is idempotent, so a poll refreshing the list when we're already
+	// correctly attached is a no-op (no reconnect churn).
 	$effect(() => {
 		const store = session.store;
 		const activeId = conductorState.activeId;
+		const list = conductors;
 		if (!store) return;
-		attachConductor(store, activeId, untrack(() => allConductors()));
+		attachConductor(store, activeId, list);
 	});
 
 	const selectedBlock = $derived(

@@ -105,13 +105,17 @@
 
 	let showAddConductor = $state(false);
 	let urlDraft = $state("");
+	let urlError = $state("");
 
 	function addConductorUrl(): void {
 		const e = addConfiguredConductor(urlDraft);
 		if (e) {
 			onconductor(e.id); // connect to it straight away
 			urlDraft = "";
+			urlError = "";
 			showAddConductor = false;
+		} else {
+			urlError = "Enter a ws:// or wss:// URL"; // invalid scheme — don't fail silently
 		}
 	}
 
@@ -270,12 +274,14 @@
 						type="text"
 						placeholder="ws://127.0.0.1:port"
 						bind:value={urlDraft}
+						oninput={() => (urlError = "")}
 						onkeydown={(e) => {
 							if (e.key === "Enter") addConductorUrl();
 						}}
 					/>
 					<button class="cond-url-add" onclick={addConductorUrl}>Connect</button>
 				</div>
+				{#if urlError}<p class="cond-url-error">{urlError}</p>{/if}
 				{#if configuredList.length}
 					<ul class="cond-configured">
 						{#each configuredList as c (c.id)}
@@ -597,6 +603,11 @@
 	}
 	.cond-url-add:hover {
 		background: color-mix(in srgb, var(--accent) 20%, var(--panel));
+	}
+	.cond-url-error {
+		margin: 0;
+		font-size: var(--fs-xs);
+		color: var(--faint);
 	}
 	.cond-configured {
 		list-style: none;

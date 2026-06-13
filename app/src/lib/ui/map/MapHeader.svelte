@@ -5,10 +5,14 @@
 	import Icon from "$lib/ui/Icon.svelte";
 	import { folding, setFolding } from "$lib/live/folding.svelte";
 	import { live } from "$lib/live/liveClient.svelte";
-	import { conductorLink } from "$lib/live/conductorClient.svelte";
-	import { activeConductorLabel, activeConductorIsRemote } from "$lib/live/conductor.svelte";
+	import { conductorLink, BUILTIN_ID } from "$lib/live/conductorClient.svelte";
 
 	let { store, readOnly = false }: { store: AccordionStore; readOnly?: boolean } = $props();
+
+	// The badge reflects the ACTUAL attached conductor (`store.conductor`), never the pending
+	// selection — so it can't claim a remote is active when the engine fell back to built-in.
+	const condLabel = $derived(store.conductor ? store.conductor.label : "Raw");
+	const condRemote = $derived(!!store.conductor && store.conductor.id !== BUILTIN_ID);
 
 	const LADDER: { kind: BlockKind; label: string }[] = [
 		{ kind: "tool_result", label: "tool results" },
@@ -137,16 +141,14 @@
 			<!-- Active conductor (ADR 0007): which strategy is managing this context. -->
 			<span
 				class="cond-status"
-				class:remote={activeConductorIsRemote()}
+				class:remote={condRemote}
 				role="status"
 				aria-label="Active conductor"
-				title={"Conductor: " +
-					activeConductorLabel() +
-					(activeConductorIsRemote() ? " · " + conductorLink.status : "")}
+				title={"Conductor: " + condLabel + (condRemote ? " · " + conductorLink.status : "")}
 			>
 				<Icon name="sliders-horizontal" size={11} />
-				{activeConductorLabel()}
-				{#if activeConductorIsRemote()}
+				{condLabel}
+				{#if condRemote}
 					<span
 						class="cond-status-dot"
 						class:connected={conductorLink.status === "connected"}

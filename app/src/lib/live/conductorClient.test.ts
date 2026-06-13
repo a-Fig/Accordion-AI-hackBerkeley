@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { RemoteRunner } from "./conductorClient.svelte";
+import { RemoteRunner, attachConductor } from "./conductorClient.svelte";
 import { AccordionStore } from "../engine/store.svelte";
 import type { Block, ParsedSession } from "../engine/types";
 import type { ConductorEntry } from "./registry";
@@ -106,18 +106,31 @@ function connectRunner(store: AccordionStore): { runner: RemoteRunner; ws: FakeW
 	return { runner, ws };
 }
 
+function sendHello(ws: FakeWebSocket, content: "full" | "shape" | "onDemand" = "full"): void {
+	ws.emit({ type: "conductor/hello", conductorProtocol: 1, id: "remote-test", label: "Remote Test", wants: { content } });
+}
+
 describe("RemoteRunner — handshake & context push", () => {
-	it("sends host/hello then a context/update on open", () => {
+	it("sends host/hello on open, then holds context until conductor/hello arrives", () => {
 		const { ws } = connectRunner(makeStore(3));
 		const hello = ws.framesOfType("host/hello");
 		expect(hello).toHaveLength(1);
 		expect(hello[0].conductorProtocol).toBe(1);
+		// No context pushed yet — we wait to learn `wants` so we never leak full text.
+		expect(ws.framesOfType("context/update")).toHaveLength(0);
 
-		const updates = ws.framesOfType("context/update");
-		expect(updates.length).toBeGreaterThanOrEqual(1);
-		const u = updates[updates.length - 1];
+		sendHello(ws, "full");
+		const u = ws.framesOfType("context/update").pop();
 		expect(u.blocks).toHaveLength(3);
-		expect(u.blocks[0].text).toBeDefined(); // wants defaults to "full"
+		expect(u.blocks[0].text).toBeDefined(); // wants:"full"
+	});
+
+	it("honours wants:shape from the very first context frame (no full text leaked)", () => {
+		const { ws } = connectRunner(makeStore(2));
+		sendHello(ws, "shape");
+		const u = ws.framesOfType("context/update").pop();
+		expect(u.blocks[0].text).toBeUndefined();
+		expect(u.blocks[0].preview).toBeDefined();
 	});
 });
 
@@ -194,5 +207,22 @@ describe("RemoteRunner — host events", () => {
 		const ev = ws.framesOfType("host/event").pop();
 		expect(ev.event).toBe("agentUnfold");
 		expect(ev.ids).toEqual(["abc123"]);
+	});
+});
+
+describe("attachConductor — human-override wiring", () => {
+	it("routes a hand fold/pin to the attached remote as host/event humanOverride", () => {
+		const store = makeStore(2);
+		attachConductor(store, ENTRY.id, [ENTRY]); // dials a RemoteRunner
+		const ws = FakeWebSocket.last!;
+		ws.open();
+
+		store.pin("m0:p0"); // human action by hand
+
+		const ev = ws.framesOfType("host/event").filter((e) => e.event === "humanOverride").pop();
+		expect(ev).toBeDefined();
+		expect(ev.ids).toEqual(["m0:p0"]);
+
+		attachConductor(store, "builtin", []); // tear the remote down so it can't leak into other tests
 	});
 });
