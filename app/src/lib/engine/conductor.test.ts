@@ -1,0 +1,234 @@
+import { describe, it, expect } from "vitest";
+import { AccordionStore } from "./store.svelte";
+import { BuiltinConductor } from "./conductor.builtin";
+import type { Conductor, ContextSnapshot, Command } from "./conductor";
+import type { Block, ParsedSession } from "./types";
+import { BLOCK_OVERHEAD } from "./tokens";
+
+/*
+ * The conductor SEAM (ADR 0007): the store runs whatever strategy is attached, clamps
+ * its commands to the one host floor (provider-validity), and lets the human always win.
+ * The built-in's byte-identical behaviour is pinned separately in conductor.builtin.test.ts;
+ * this file pins the seam itself — attach/detach, substitution, and clamping.
+ */
+
+function blk(i: number, kind: Block["kind"] = "text", tokens = 1000, extra: Partial<Block> = {}): Block {
+	return {
+		id: `m${i}:p0`,
+		kind,
+		turn: i + 1,
+		order: i,
+		text: `block ${i} ` + "x".repeat(tokens * 4),
+		tokens,
+		override: null,
+		autoFolded: false,
+		by: null,
+		...extra,
+	};
+}
+
+function makeStore(blocks: Block[]): AccordionStore {
+	const parsed: ParsedSession = {
+		meta: { format: "pi", title: "t", cwd: "", model: "" },
+		blocks,
+		lineCount: 0,
+		skipped: 0,
+	};
+	return new AccordionStore(parsed);
+}
+
+/** A conductor whose desired state the test sets directly — to drive the full pass. */
+class StubConductor implements Conductor {
+	readonly id = "stub";
+	readonly label = "Stub";
+	cmds: Command[] | null = [];
+	lastSnapshot: ContextSnapshot | null = null;
+	conduct(snap: ContextSnapshot): Command[] | null {
+		this.lastSnapshot = snap;
+		return this.cmds;
+	}
+}
+
+describe("conductor seam — attach / detach", () => {
+	it("detach() makes the context raw (nothing folded)", () => {
+		const s = makeStore(Array.from({ length: 6 }, (_, i) => blk(i)));
+		s.setProtect(2000);
+		s.setBudget(2500); // 6000 live > budget → built-in must fold
+		expect(s.foldedCount).toBeGreaterThan(0);
+
+		s.detach();
+		expect(s.foldedCount).toBe(0);
+		expect(s.blocks.every((b) => !s.isFolded(b))).toBe(true);
+		expect(s.blocks.every((b) => b.subst === undefined)).toBe(true);
+		expect(s.liveTokens).toBe(s.fullTokens);
+	});
+
+	it("re-attaching a fresh built-in restores folding", () => {
+		const s = makeStore(Array.from({ length: 6 }, (_, i) => blk(i)));
+		s.setProtect(2000);
+		s.setBudget(2500);
+		s.detach();
+		expect(s.foldedCount).toBe(0);
+
+		s.attach(new BuiltinConductor());
+		expect(s.foldedCount).toBeGreaterThan(0);
+		expect(s.liveTokens).toBeLessThanOrEqual(s.budget);
+	});
+
+	it("no conductor never invents folding even over budget", () => {
+		const s = makeStore(Array.from({ length: 6 }, (_, i) => blk(i)));
+		s.detach();
+		s.setProtect(2000);
+		s.setBudget(2500);
+		expect(s.foldedCount).toBe(0); // raw, even though wildly over budget
+	});
+});
+
+describe("conductor seam — human overrides always win", () => {
+	it("a human pin survives a conductor fold of the same block", () => {
+		const s = makeStore(Array.from({ length: 4 }, (_, i) => blk(i)));
+		s.setProtect(0);
+		s.pin("m0:p0");
+
+		const stub = new StubConductor();
+		stub.cmds = [{ kind: "fold", ids: ["m0:p0", "m1:p0"] }];
+		s.attach(stub);
+
+		expect(s.isFolded(s.get("m0:p0")!)).toBe(false); // pinned → conductor refused
+		expect(s.get("m0:p0")!.override).toBe("pinned");
+		expect(s.isFolded(s.get("m1:p0")!)).toBe(true); // un-held → conductor folds it
+		expect(s.get("m1:p0")!.by).toBe("conductor");
+	});
+
+	it("a human manual fold survives a conductor pass that folds nothing", () => {
+		const s = makeStore(Array.from({ length: 4 }, (_, i) => blk(i)));
+		s.setProtect(0);
+		s.fold("m0:p0"); // human fold
+
+		const stub = new StubConductor();
+		stub.cmds = []; // conductor wants nothing folded
+		s.attach(stub);
+
+		expect(s.isFolded(s.get("m0:p0")!)).toBe(true);
+		expect(s.get("m0:p0")!.override).toBe("folded");
+	});
+});
+
+describe("conductor seam — substitution", () => {
+	it("fold with no digest falls back to the engine digest (recovery tag preserved)", () => {
+		const s = makeStore(Array.from({ length: 3 }, (_, i) => blk(i)));
+		s.setProtect(0);
+		const stub = new StubConductor();
+		stub.cmds = [{ kind: "fold", ids: ["m0:p0"] }];
+		s.attach(stub);
+
+		const b = s.get("m0:p0")!;
+		expect(s.isFolded(b)).toBe(true);
+		expect(s.digestOf(b)).toContain("FOLDED"); // engine digest carries {#code FOLDED}
+		expect(b.subst).toBeUndefined();
+	});
+
+	it("replace substitutes arbitrary content; '' is the safe 'delete'", () => {
+		const s = makeStore(Array.from({ length: 3 }, (_, i) => blk(i)));
+		s.setProtect(0);
+		const stub = new StubConductor();
+		stub.cmds = [
+			{ kind: "replace", id: "m0:p0", content: "see summary above" },
+			{ kind: "replace", id: "m1:p0", content: "" },
+		];
+		s.attach(stub);
+
+		const a = s.get("m0:p0")!;
+		expect(s.isFolded(a)).toBe(true);
+		expect(s.digestOf(a)).toBe("see summary above");
+
+		const e = s.get("m1:p0")!;
+		expect(s.isFolded(e)).toBe(true);
+		expect(s.digestOf(e)).toBe(""); // emptied
+		expect(s.effTokens(e)).toBe(BLOCK_OVERHEAD); // costs only structural overhead, never removed
+	});
+
+	it("restore returns a conductor-folded block to live", () => {
+		const s = makeStore(Array.from({ length: 3 }, (_, i) => blk(i)));
+		s.setProtect(0);
+		const stub = new StubConductor();
+		stub.cmds = [{ kind: "fold", ids: ["m0:p0"] }];
+		s.attach(stub);
+		expect(s.isFolded(s.get("m0:p0")!)).toBe(true);
+
+		stub.cmds = [{ kind: "restore", ids: ["m0:p0"] }];
+		s.refold();
+		expect(s.isFolded(s.get("m0:p0")!)).toBe(false);
+	});
+});
+
+describe("conductor seam — clamp reports (provider-validity floor)", () => {
+	it("reports an unknown id instead of throwing", () => {
+		const s = makeStore([blk(0), blk(1)]);
+		const reports = s.applyCommands([{ kind: "fold", ids: ["ghost:p0"] }], "conductor");
+		expect(reports).toHaveLength(1);
+		expect(reports[0].reason).toBe("unknown-id");
+	});
+
+	it("reports a human-override conflict and leaves the human's choice intact", () => {
+		const s = makeStore([blk(0), blk(1)]);
+		s.setProtect(0);
+		s.pin("m0:p0");
+		const reports = s.applyCommands([{ kind: "fold", ids: ["m0:p0"] }], "conductor");
+		expect(reports[0].reason).toBe("human-override");
+		expect(s.get("m0:p0")!.override).toBe("pinned");
+		expect(s.isFolded(s.get("m0:p0")!)).toBe(false);
+	});
+
+	it("reports an invalid group (fewer than two blocks)", () => {
+		const s = makeStore([blk(0), blk(1)]);
+		const reports = s.applyCommands([{ kind: "group", ids: ["m0:p0"] }], "conductor");
+		expect(reports[0].reason).toBe("invalid-group");
+	});
+});
+
+describe("conductor seam — group command", () => {
+	it("collapses a contiguous run via the existing group machinery", () => {
+		const s = makeStore(Array.from({ length: 4 }, (_, i) => blk(i)));
+		s.setProtect(0);
+		const stub = new StubConductor();
+		stub.cmds = [{ kind: "group", ids: ["m0:p0", "m1:p0"] }];
+		s.attach(stub);
+
+		expect(s.groups.length).toBe(1);
+		expect(s.groups[0].folded).toBe(true);
+		expect(s.isFolded(s.get("m0:p0")!)).toBe(true);
+		expect(s.isFolded(s.get("m1:p0")!)).toBe(true);
+	});
+
+	it("refuses to group over a human-held block (human always wins)", () => {
+		const s = makeStore(Array.from({ length: 4 }, (_, i) => blk(i)));
+		s.setProtect(0);
+		s.pin("m1:p0"); // human pins a block inside the conductor's intended range
+
+		const reports = s.applyCommands([{ kind: "group", ids: ["m0:p0", "m2:p0"] }], "conductor");
+
+		expect(reports.some((r) => r.reason === "human-override")).toBe(true);
+		expect(s.groups.length).toBe(0); // no group created — the whole command is refused
+		expect(s.isFolded(s.get("m1:p0")!)).toBe(false); // pinned block stays live & full
+		expect(s.get("m1:p0")!.override).toBe("pinned");
+	});
+});
+
+describe("conductor seam — hold last state (null)", () => {
+	it("re-applies the last batch across an append, leaving new blocks raw", () => {
+		const s = makeStore(Array.from({ length: 3 }, (_, i) => blk(i)));
+		s.setProtect(0);
+		const stub = new StubConductor();
+		stub.cmds = [{ kind: "fold", ids: ["m0:p0"] }];
+		s.attach(stub);
+		expect(s.isFolded(s.get("m0:p0")!)).toBe(true);
+
+		// Conductor goes silent (still thinking) and a new block streams in.
+		stub.cmds = null;
+		s.appendBlocks([blk(9)]);
+
+		expect(s.isFolded(s.get("m0:p0")!)).toBe(true); // held
+		expect(s.isFolded(s.get("m9:p0")!)).toBe(false); // new content arrives raw
+	});
+});

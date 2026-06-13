@@ -1,9 +1,12 @@
 <script lang="ts">
-	import { onMount } from "svelte";
+	import { onMount, untrack } from "svelte";
 	import { session, isTauriEnv, loadSample, openFile, loadFilePath } from "$lib/session.svelte.ts";
 	import { connectLive, disconnectLive, live } from "$lib/live/liveClient.svelte";
 	import { discovery, startDiscovery, stopDiscovery, selectSession, DEMO_ID } from "$lib/live/discovery.svelte";
 	import { claudeDiscovery, startClaudeDiscovery, stopClaudeDiscovery, selectClaude } from "$lib/live/claudeDiscovery.svelte";
+	import { conductorState, setActiveConductor } from "$lib/live/conductor.svelte";
+	import { startConductorDiscovery, stopConductorDiscovery, allConductors } from "$lib/live/conductorDiscovery.svelte";
+	import { attachConductor } from "$lib/live/conductorClient.svelte";
 	import { DEFAULT_PORT } from "$lib/live/protocol";
 	import type { SessionEntry } from "$lib/live/registry";
 	import type { ClaudeCodeSession } from "$lib/live/claude";
@@ -29,6 +32,23 @@
 	$effect(() => {
 		if (isTauriEnv && source === "claude") startClaudeDiscovery();
 		else stopClaudeDiscovery();
+	});
+
+	// ── Conductors (ADR 0007) ──────────────────────────────────────────────
+	// External conductors to offer in the switcher (discovered + configured). The built-in
+	// and "Raw" entries are added by the sidebar itself. Reactive so newly-found conductors
+	// appear without a reload.
+	const conductors = $derived(allConductors());
+
+	// Attach the selected conductor to the active session's store. Deliberately reacts ONLY
+	// to the store and the selection — NOT to the `conductors` list — so a discovery poll
+	// refreshing that list every few seconds never tears down and reconnects a live remote
+	// conductor. We read the list untracked at attach time to resolve a remote id → endpoint.
+	$effect(() => {
+		const store = session.store;
+		const activeId = conductorState.activeId;
+		if (!store) return;
+		attachConductor(store, activeId, untrack(() => allConductors()));
 	});
 
 	const selectedBlock = $derived(
@@ -87,9 +107,11 @@
 
 	onMount(() => {
 		startDiscovery(onFocusRequest);
+		startConductorDiscovery();
 		return () => {
 			stopDiscovery();
 			stopClaudeDiscovery();
+			stopConductorDiscovery();
 			disconnectLive();
 		};
 	});
@@ -117,6 +139,9 @@
 			claudeSessions={claudeDiscovery.sessions}
 			claudeSelected={claudeDiscovery.selected}
 			onselectclaude={selectClaudeSession}
+			conductor={conductorState.activeId}
+			{conductors}
+			onconductor={setActiveConductor}
 		/>
 	{/if}
 

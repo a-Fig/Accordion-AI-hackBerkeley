@@ -5,6 +5,8 @@
 	import Icon from "$lib/ui/Icon.svelte";
 	import { folding, setFolding } from "$lib/live/folding.svelte";
 	import { live } from "$lib/live/liveClient.svelte";
+	import { conductorLink } from "$lib/live/conductorClient.svelte";
+	import { activeConductorLabel, activeConductorIsRemote } from "$lib/live/conductor.svelte";
 
 	let { store, readOnly = false }: { store: AccordionStore; readOnly?: boolean } = $props();
 
@@ -132,6 +134,28 @@
 
 		<!-- ── Right: controls cluster ── -->
 		<div class="ctl">
+			<!-- Active conductor (ADR 0007): which strategy is managing this context. -->
+			<span
+				class="cond-status"
+				class:remote={activeConductorIsRemote()}
+				role="status"
+				aria-label="Active conductor"
+				title={"Conductor: " +
+					activeConductorLabel() +
+					(activeConductorIsRemote() ? " · " + conductorLink.status : "")}
+			>
+				<Icon name="sliders-horizontal" size={11} />
+				{activeConductorLabel()}
+				{#if activeConductorIsRemote()}
+					<span
+						class="cond-status-dot"
+						class:connected={conductorLink.status === "connected"}
+						class:error={conductorLink.status === "error"}
+						aria-hidden="true"
+					></span>
+				{/if}
+			</span>
+
 			{#if readOnly}
 				<span
 					class="ro-badge"
@@ -374,6 +398,43 @@
 		border-radius: var(--radius-pill);
 		white-space: nowrap;
 		user-select: none;
+	}
+
+	/* Active-conductor badge — same pill chrome as .ro-badge; an external (remote)
+	   conductor gets an accent tint + a live status dot. */
+	.cond-status {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		font-size: var(--fs-xs);
+		font-weight: 600;
+		letter-spacing: 0.01em;
+		color: var(--muted);
+		background: var(--panel-2);
+		border: 1px solid var(--line);
+		padding: 3px 9px 3px 7px;
+		border-radius: var(--radius-pill);
+		white-space: nowrap;
+		user-select: none;
+	}
+	.cond-status.remote {
+		color: var(--accent);
+		background: var(--accent-soft);
+		border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+	}
+	.cond-status-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--faint);
+		flex: 0 0 auto;
+	}
+	.cond-status-dot.connected {
+		background: var(--accent);
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
+	}
+	.cond-status-dot.error {
+		background: var(--k-tool_result, #f0a35e);
 	}
 
 	/* Folding-arm toggle */

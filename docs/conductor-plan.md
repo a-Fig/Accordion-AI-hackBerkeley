@@ -1,5 +1,11 @@
 # The Conductor — Master Plan
 
+> **Partly superseded by [ADR 0007](adr/0007-conductor-protocol.md).** This plan's
+> framing of the built-in auto-folder as a permanent privileged backstop no longer holds:
+> under ADR 0007 the built-in is just the *default* conductor — detachable and swappable —
+> and "no conductor attached" means raw context, not auto-folded context. The milestone
+> roadmap below (richer strategies: summaries, relevance, hierarchy) still stands.
+
 > The last major feature before Accordion reaches its final form. This document turns
 > VISION.md's one-paragraph definition into five cumulative milestones, each with a
 > detailed work plan, the tools and data it needs, and measurable exit criteria.

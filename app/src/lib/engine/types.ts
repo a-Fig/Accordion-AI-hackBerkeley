@@ -16,7 +16,7 @@ export type BlockKind =
 	| "tool_result"; // WHAT the agent saw (often huge, decays fast)
 
 /** Who last changed a block's fold state. */
-export type Actor = "you" | "agent" | "auto";
+export type Actor = "you" | "agent" | "auto" | "conductor";
 
 /**
  * A manual override that the automatic folder must respect:
@@ -58,6 +58,15 @@ export interface Block {
 	autoFolded: boolean;
 	/** Who last touched this block's fold state. */
 	by: Actor | null;
+	/**
+	 * Conductor-substituted content (ADR 0007). When set, this is exactly what a folded
+	 * block renders / the agent receives — the conductor's own digest or replacement
+	 * (`""` = the "delete" form: emptied but kept in place). Distinct from `override`,
+	 * which stays the HUMAN's alone: a conductor never writes `override`, only `subst`
+	 * (+ `autoFolded`). Cleared to baseline on every conductor pass for `override === null`
+	 * blocks. Absent → a folded block falls back to the engine's per-kind `digest()`.
+	 */
+	subst?: string;
 }
 
 /**
