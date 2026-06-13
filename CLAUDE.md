@@ -174,7 +174,7 @@ not protection against the conductor).
   `live/conductorClient.svelte.ts` (`RemoteRunner` bridges the async WS ↔ the synchronous
   `conduct()`), `live/conductorDiscovery.svelte.ts` (polls Rust `list_conductors` +
   hand-configured URLs), switched via the header `ui/map/ConductorMenu.svelte` dropdown.
-  Local discovery files live at `~/.accordion/conductors/<id>.json` (15 s heartbeat).
+  Local discovery files live at `~/.accordion/conductors/<id>.json` (5 s heartbeat; 15 s stale/reap window).
 - **Writing one:** [conductors/README.md](conductors/README.md) leads with the in-process
   path + a minimal example; [docs/conductor-protocol.md](docs/conductor-protocol.md) is the
   full developer reference (the `ConductorView`/`ViewBlock`/`Command` tables first, then the

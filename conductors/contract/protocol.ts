@@ -88,6 +88,11 @@ export interface CapResultMessage {
  * Something happened that the conductor should know about but did not initiate:
  *  - "agentUnfold"   — the live agent called `unfold` and pulled blocks back to full;
  *  - "humanOverride" — the human pinned/folded/unfolded by hand (their choice always wins).
+ *
+ * `ids` are BLOCK IDS in both cases (the same ids that appear in `ViewBlock.id`), so a
+ * conductor can correlate them directly against the blocks it received in `context/update`.
+ * For `agentUnfold`, all block ids that mapped to the restored fold codes are included (a
+ * short hash can rarely collide, so multiple ids per code are possible).
  */
 export interface HostEventMessage {
 	type: "host/event";

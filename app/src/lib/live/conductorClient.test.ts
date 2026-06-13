@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { RemoteRunner, attachConductor } from "./conductorClient.svelte";
+import { RemoteRunner, attachConductor, conductorLink } from "./conductorClient.svelte";
 import { AccordionStore } from "../engine/store.svelte";
 import type { Block, ParsedSession } from "../engine/types";
 import type { ConductorEntry } from "./registry";
@@ -137,6 +137,7 @@ describe("RemoteRunner — handshake & context push", () => {
 describe("RemoteRunner — commands drive the store", () => {
 	it("applies a fold and reports no clamp for a valid command", () => {
 		const store = makeStore(3);
+		store.setProtect(0); // small fixture (3×1000 tok) is entirely inside the 20k tail — disable protection so a fold is allowed
 		const { ws } = connectRunner(store);
 		ws.emit({ type: "conductor/commands", rev: 1, commands: [{ kind: "fold", ids: ["m0:p0"] }] });
 
@@ -150,6 +151,7 @@ describe("RemoteRunner — commands drive the store", () => {
 
 	it("replaces content and round-trips a clamp report for an unknown id", () => {
 		const store = makeStore(3);
+		store.setProtect(0); // see above — disable protection so the tiny fixture's blocks are foldable
 		const { ws } = connectRunner(store);
 		ws.emit({
 			type: "conductor/commands",
@@ -167,6 +169,7 @@ describe("RemoteRunner — commands drive the store", () => {
 
 	it("holds the last command set when the conductor goes silent", () => {
 		const store = makeStore(3);
+		store.setProtect(0); // see above — disable protection so the tiny fixture's blocks are foldable
 		const { ws } = connectRunner(store);
 		ws.emit({ type: "conductor/commands", commands: [{ kind: "fold", ids: ["m0:p0"] }] });
 		expect(store.isFolded(store.get("m0:p0")!)).toBe(true);
@@ -224,5 +227,103 @@ describe("attachConductor — human-override wiring", () => {
 		expect(ev.ids).toEqual(["m0:p0"]);
 
 		attachConductor(store, "builtin", []); // tear the remote down so it can't leak into other tests
+	});
+});
+
+describe("RemoteRunner — stale-rev guard (Bug 1)", () => {
+	it("drops a conductor/commands reply whose rev is older than the latest context/update sent", () => {
+		const store = makeStore(3);
+		store.setProtect(0);
+		const { runner, ws } = connectRunner(store);
+		sendHello(ws, "full");
+
+		// After conductor/hello, one context/update was sent (rev=1).
+		// A reply for rev=0 (< 1) must be dropped — block must NOT be folded.
+		ws.emit({ type: "conductor/commands", rev: 0, commands: [{ kind: "fold", ids: ["m0:p0"] }] });
+		expect(store.isFolded(store.get("m0:p0")!)).toBe(false);
+
+		// A reply for the current rev (1) must be applied.
+		ws.emit({ type: "conductor/commands", rev: 1, commands: [{ kind: "fold", ids: ["m0:p0"] }] });
+		expect(store.isFolded(store.get("m0:p0")!)).toBe(true);
+
+		runner.close();
+	});
+
+	it("accepts a conductor/commands reply with no rev (backward compat with conductors that don't echo rev)", () => {
+		const store = makeStore(3);
+		store.setProtect(0);
+		const { runner, ws } = connectRunner(store);
+		sendHello(ws, "full");
+
+		// No rev field — must be accepted (backward compatible).
+		ws.emit({ type: "conductor/commands", commands: [{ kind: "fold", ids: ["m0:p0"] }] });
+		expect(store.isFolded(store.get("m0:p0")!)).toBe(true);
+
+		runner.close();
+	});
+});
+
+describe("RemoteRunner — protocol-mismatch status survives teardown (Bug 2)", () => {
+	it("preserves error status and detail after the mismatch branch calls close()", () => {
+		const store = makeStore(2);
+		const { ws } = connectRunner(store);
+		// Do NOT sendHello — we want to test the mismatch branch directly.
+
+		// Emit a conductor/hello with a wrong protocol version.
+		ws.emit({ type: "conductor/hello", conductorProtocol: 999, id: "x", label: "X" });
+
+		// close() must NOT have reset status to "idle" — the error must survive.
+		expect(conductorLink.status).toBe("error");
+		expect(conductorLink.detail).toMatch(/protocol mismatch/);
+	});
+});
+
+describe("RemoteRunner — stale desired cleared on unexpected disconnect (Bug 3)", () => {
+	it("clears to raw (conduct returns []) after an unexpected socket close", () => {
+		const store = makeStore(3);
+		store.setProtect(0);
+		const { runner, ws } = connectRunner(store);
+		sendHello(ws, "full");
+
+		// Arm the runner with a fold command (rev=1, matching what was sent).
+		ws.emit({ type: "conductor/commands", rev: 1, commands: [{ kind: "fold", ids: ["m0:p0"] }] });
+		expect(store.isFolded(store.get("m0:p0")!)).toBe(true);
+
+		// Simulate unexpected drop: call onclose without setting manualClose (no runner.close()).
+		ws.onclose?.();
+
+		// The status should be "error" (not "idle") to signal an unexpected drop.
+		expect(conductorLink.status).toBe("error");
+
+		// conduct() should now return [] (clear to raw), not the stale fold command.
+		// We use a minimal ConductorView — the runner only reads its cached `desired`.
+		const view = {
+			budget: 10000,
+			contextWindow: 200000,
+			liveTokens: 3000,
+			protectedFromIndex: 0,
+			protectTokens: 0,
+			blocks: [],
+		};
+		const result = runner.conduct(view as any);
+		expect(result).toEqual([]);
+	});
+
+	it("the STORE goes raw immediately after disconnect — without manually calling conduct()", () => {
+		const store = makeStore(3);
+		store.setProtect(0);
+		const { ws } = connectRunner(store);
+		sendHello(ws, "full");
+
+		// Fold m0:p0 via conductor command.
+		ws.emit({ type: "conductor/commands", rev: 1, commands: [{ kind: "fold", ids: ["m0:p0"] }] });
+		expect(store.isFolded(store.get("m0:p0")!)).toBe(true);
+
+		// Unexpected close — the onclose handler must immediately call store.refold() so the
+		// block flips to raw in the same tick, not waiting for some future unrelated refold.
+		ws.onclose?.();
+
+		// The store must be raw NOW, without any manual conduct() call from the test.
+		expect(store.isFolded(store.get("m0:p0")!)).toBe(false);
 	});
 });

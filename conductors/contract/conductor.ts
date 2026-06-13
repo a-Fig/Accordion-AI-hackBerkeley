@@ -118,8 +118,11 @@ export interface ReplaceCommand {
 
 /**
  * Collapse a CONTIGUOUS run of blocks into a single summary entry (summary-on-head,
- * the rest emptied — never removed). Non-contiguous selections are not representable;
- * a conductor wanting that must empty/replace blocks individually instead.
+ * the rest emptied — never removed). The group covers the contiguous run from the FIRST
+ * to the LAST named id, snapped outward to whole messages — so any blocks BETWEEN the
+ * first and last id are swept into the group even if you did not name them, and a partly-
+ * named message is rounded up to its whole. To collapse a non-contiguous set, issue
+ * separate `group` commands per run, or `replace`/empty individual blocks instead.
  */
 export interface GroupCommand {
 	kind: "group";
@@ -168,6 +171,8 @@ export type ClampReason =
 	| "grouped"
 	/** A group command's ids were not a valid contiguous, ungrouped, ≥2-member run. */
 	| "invalid-group"
+	/** The block is inside the protected working tail; protection is absolute, the host won't fold it. */
+	| "protected"
 	/** The op was a no-op (e.g. restoring an already-live block). */
 	| "noop";
 

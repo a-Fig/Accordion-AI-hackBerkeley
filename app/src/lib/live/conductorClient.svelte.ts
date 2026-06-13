@@ -25,6 +25,7 @@ import type { ConductorEntry } from "./registry";
 import {
 	CONDUCTOR_PROTOCOL_VERSION,
 	isHostMessage, // (re-exported for symmetry/tests; host parses conductor msgs)
+	isConductorMessage,
 	type Conductor,
 	type ConductorView,
 	type Command,
@@ -131,19 +132,28 @@ export class RemoteRunner implements Conductor {
 		ws.onclose = () => {
 			if (this.ws !== ws) return;
 			this.ws = null;
-			if (!this.manualClose && conductorLink.status !== "error") {
-				conductorLink.status = "idle";
-				conductorLink.detail = "disconnected";
+			if (!this.manualClose) {
+				// Unexpected drop: clear stale commands so conduct() returns [] (raw) rather
+				// than perpetuating the last known desired state against a dead conductor.
+				this.desired = [];
+				// Immediately re-run the conductor pass so the store renders raw NOW rather than
+				// waiting for the next unrelated refold. conduct() reads this.desired (now [])
+				// and returns [], which clears all conductor folds in the same tick.
+				this.store.refold();
+				if (conductorLink.status !== "error") {
+					conductorLink.status = "error";
+					conductorLink.detail = `disconnected from ${this.entry.label}`;
+				}
 			}
 		};
 	}
 
-	close(): void {
+	close(finalStatus?: "idle" | "error", finalDetail?: string): void {
 		this.manualClose = true;
 		const ws = this.ws;
 		this.ws = null;
-		conductorLink.status = "idle";
-		conductorLink.detail = "";
+		conductorLink.status = finalStatus ?? "idle";
+		conductorLink.detail = finalDetail ?? "";
 		try {
 			ws?.close();
 		} catch {
@@ -153,14 +163,13 @@ export class RemoteRunner implements Conductor {
 
 	// ---- inbound ----------------------------------------------------------
 	private handle(msg: unknown): void {
-		if (!msg || typeof msg !== "object") return;
-		const m = msg as ConductorMessage;
+		if (!isConductorMessage(msg)) return;
+		const m: ConductorMessage = msg;
 		switch (m.type) {
 			case "conductor/hello":
 				if (m.conductorProtocol !== CONDUCTOR_PROTOCOL_VERSION) {
-					conductorLink.status = "error";
-					conductorLink.detail = `protocol mismatch — conductor v${m.conductorProtocol}, app v${CONDUCTOR_PROTOCOL_VERSION}`;
-					this.close();
+					const detail = `protocol mismatch — conductor v${m.conductorProtocol}, app v${CONDUCTOR_PROTOCOL_VERSION}`;
+					this.close("error", detail);
 					return;
 				}
 				if (m.wants?.content) this.wants = m.wants.content;
@@ -168,6 +177,12 @@ export class RemoteRunner implements Conductor {
 				this.store.refold(); // first context push, now honouring the declared `wants`
 				break;
 			case "conductor/commands": {
+				// Drop replies to stale snapshots. If the conductor echoed a rev that is
+				// older than the latest context/update we have sent, this reply was computed
+				// against a state we already superseded — applying it would rewind decisions.
+				// If rev is absent, accept as before (backward-compatible with conductors that
+				// do not echo rev).
+				if (m.rev !== undefined && m.rev < this.rev) break;
 				this.desired = Array.isArray(m.commands) ? m.commands : [];
 				this.lastRev = m.rev ?? this.rev;
 				// Apply now. We poke the store, which re-enters conduct(); suppress the

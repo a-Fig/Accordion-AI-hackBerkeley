@@ -110,7 +110,7 @@ export function resolveUnfold(store: AccordionStore, codes: string[]): { restore
 		for (const g of store.groups) {
 			if (g.folded && foldCode(g.id) === code) {
 				store.unfoldGroup(g.id, "agent");
-				restored.push({ code, kind: "text", label: `group · ${g.memberIds.length} blocks` });
+				restored.push({ code, kind: "text", label: `group · ${g.memberIds.length} blocks`, ids: g.memberIds });
 				hit = true;
 			}
 		}
@@ -128,7 +128,7 @@ export function resolveUnfold(store: AccordionStore, codes: string[]): { restore
 			const grp = store.groupOf(b);
 			if (grp?.folded) store.unfoldGroup(grp.id, "agent");
 			else store.unfold(b.id, "agent");
-			restored.push({ code, kind: b.kind, label: blockLabel(b) });
+			restored.push({ code, kind: b.kind, label: blockLabel(b), ids: [b.id] });
 			hit = true;
 		}
 		if (!hit) missing.push(code);

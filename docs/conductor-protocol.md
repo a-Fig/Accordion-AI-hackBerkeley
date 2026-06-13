@@ -103,7 +103,7 @@ pair can never orphan.
 |-----------|--------------------------------------|------------------------------------------------------------------------|
 | `fold`    | `{ kind:"fold", ids, digest? }`      | Collapse blocks to a digest. No `digest` → the host's per-kind digest + the `{#code FOLDED}` agent-recovery tag. A `digest` string → exactly that text is shown and the agent receives it. |
 | `replace` | `{ kind:"replace", id, content }`    | Substitute a block's content with arbitrary text. `content: ""` is the safe form of **delete** — the block stays in place (pairing intact) but contributes almost nothing. |
-| `group`   | `{ kind:"group", ids }`              | Collapse a **contiguous** run into one summary entry (summary-on-head, the rest emptied — never removed). Non-contiguous selections are not representable; empty/replace individually instead. |
+| `group`   | `{ kind:"group", ids }`              | Collapse a **contiguous** run into one summary entry (summary-on-head, the rest emptied — never removed). The group covers the run from the **first to the last** named id, snapped outward to whole messages — blocks *between* the first and last are swept in even if unnamed. For a non-contiguous set, issue one `group` per run, or empty/replace blocks individually. |
 | `restore` | `{ kind:"restore", ids }`            | Return blocks to full, live content (undo a fold/replace). No-op on a human-held block. |
 | `pin`     | `{ kind:"pin", ids }`                | Assert blocks stay live and open — e.g. force live a block an earlier command in the same batch folded. Never overrides a *human* pin. |
 
@@ -133,6 +133,7 @@ A **`ClampReport`** is `{ command, ids, reason, detail }`. `reason` is one of:
 | `human-override` | a human pin / manual fold / manual unfold owns the block — the human wins      |
 | `grouped`        | the block is inside a folded group; the group overlay owns it                  |
 | `invalid-group`  | a `group`'s ids were not a valid contiguous, ungrouped, ≥2-member run          |
+| `protected`      | the block is inside the protected working tail; protection is absolute — the host won't fold it |
 | `noop`           | the command was a no-op (e.g. restoring an already-live block)                 |
 
 In-process, `conduct()` returns and the host applies synchronously; the clamp reports are
@@ -283,8 +284,8 @@ reverted by host healing). Each `block` is a `ViewBlock` — its `text` is prese
 ```
 
 `reason` is one of the `ClampReason`s tabled in Part 1 (`unknown-id`, `human-override`,
-`grouped`, `invalid-group`, `noop`). Commands are never silently dropped — every clamp is
-reported.
+`grouped`, `invalid-group`, `protected`, `noop`). Commands are never silently dropped — every
+clamp is reported.
 
 **`cap/result`** — answer to a `cap/request` you sent (same `reqId`).
 
@@ -302,7 +303,11 @@ On failure: `{ "type": "cap/result", "reqId": "r1", "ok": false, "error": "unkno
 
 `event` is `"agentUnfold"` (the live agent pulled blocks back to full via its `unfold`
 tool) or `"humanOverride"` (the human pinned/folded/unfolded by hand — their choice always
-wins). Treat both as facts about the current state to fold into your next batch.
+wins). `ids` are **block ids** in both cases — the same ids that appear in `ViewBlock.id`,
+so you can correlate them directly against the blocks you received in `context/update`. For
+`agentUnfold`, all block ids that mapped to the restored fold codes are included (a short
+hash can rarely collide → multiple ids per code are possible). Treat both events as facts
+about the current state to fold into your next batch.
 
 ### conductor → host
 
@@ -382,13 +387,16 @@ wss.on("connection", (ws) => {
     if (msg.type !== "context/update") return; // ignore hello/result/event for this demo
 
     // Fold oldest, non-protected, not-yet-folded tool_results until under budget.
-    let live = msg.blocks.reduce((n, b) => n + (b.folded ? 0 : b.tokens), 0);
+    // Use the host-supplied liveTokens as the baseline (already accounts for human
+    // folds, folded-group carriers, and digest residue). Each fold saves the
+    // difference between full and folded cost (foldedTokens is precomputed).
+    let live = msg.liveTokens;
     const ids = [];
     for (const b of msg.blocks) {          // blocks arrive in conversation order (oldest first)
       if (live <= msg.budget) break;
       if (b.kind !== "tool_result" || b.folded || b.protected) continue;
       ids.push(b.id);
-      live -= b.tokens;                    // approximate; the host clamps + re-counts exactly
+      live -= (b.tokens - b.foldedTokens); // host clamps + re-counts exactly
     }
 
     ws.send(JSON.stringify({
@@ -401,8 +409,7 @@ wss.on("connection", (ws) => {
 console.log("recency-folder listening on ws://127.0.0.1:7700");
 ```
 
-This is intentionally crude (it estimates token savings as the whole block, where the host
-counts the digest residue; it ignores `host/commandResult` and `host/event`). A real
+This is intentionally minimal (it ignores `host/commandResult` and `host/event`). A real
 conductor reads the clamp reports, respects `human-override`, and may use `countTokens` for
 exact accounting. But it is correct against the real message shapes and Accordion will
 attach to it, fold tiles, and report back.

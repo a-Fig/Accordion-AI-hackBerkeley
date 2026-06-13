@@ -396,7 +396,15 @@ export class AccordionStore {
 			this.lastReports = reports;
 			if (result !== null) this.lastCmds = cmds;
 
-			for (const r of reports) this.emit(by, `clamped · ${r.reason}`, r.detail);
+			for (const r of reports) {
+				// Skip `noop` reports to the activity log. `by` is always "auto" in a conductor
+				// pass, so a conductor issuing pin/restore on already-live blocks would otherwise
+				// spam "clamped · noop" on every refold. The wire still receives them via
+				// `lastReports` (assigned above). Non-noop clamps (protected, unknown-id, …)
+				// are always logged so they are visible in the activity feed.
+				if (r.reason === "noop") continue;
+				this.emit(by, `clamped · ${r.reason}`, r.detail);
+			}
 		} finally {
 			this.conducting = false;
 		}
@@ -416,10 +424,12 @@ export class AccordionStore {
 	}
 
 	/**
-	 * Clear everything a conductor owns (`autoFolded`, `subst`, and an `auto`/`conductor`
-	 * attribution) on blocks the human has NOT overridden — returning them to full, live
-	 * content. Human overrides (pin / manual fold / manual unfold) and folded groups are
-	 * left untouched; they are not the conductor's to reset.
+	 * Clear everything a conductor owns on blocks the human has NOT overridden — returning
+	 * them to full, live content — AND drop every conductor/auto-owned group. Human overrides
+	 * (pin / manual fold / manual unfold) and HUMAN groups (`by:"you"`) are left untouched;
+	 * they are not the conductor's to reset. Conductor groups (`by !== "you"`) are dropped so
+	 * each pass rebuilds its groups from the current `group` command batch — otherwise a group
+	 * the conductor stops asking for (returns `[]`, or is detached) would strand folded forever.
 	 */
 	private clearConductorState(): void {
 		for (const b of this.blocks) {
@@ -429,6 +439,13 @@ export class AccordionStore {
 				if (b.by === "auto" || b.by === "conductor") b.by = null;
 			}
 		}
+		// Drop conductor/auto groups (by:"auto" or by:"conductor"); keep human and absent-by
+		// groups. Absent `by` means a legacy or test-constructed group literal with no
+		// provenance set — preserve it, same as a human group. Only explicit conductor
+		// provenance is rebuilt from scratch each pass. Reassign only if something changed so
+		// the reactive `groups` (and its derived maps) don't churn on every clean pass.
+		const humanGroups = this.groups.filter((g) => g.by !== "auto" && g.by !== "conductor");
+		if (humanGroups.length !== this.groups.length) this.groups = humanGroups;
 	}
 
 	/**
@@ -508,6 +525,9 @@ export class AccordionStore {
 		if (!b) return void reports.push(clamp(kind, [id], "unknown-id", `no block ${id}`));
 		if (b.override !== null) return void reports.push(clamp(kind, [id], "human-override", `${label(b)} is held by the human`));
 		if (this.groupWire.has(id)) return void reports.push(clamp(kind, [id], "grouped", `${label(b)} is inside a folded group`));
+		// Protection is ABSOLUTE: a block in the working tail is never folded, by a conductor
+		// OR the user. Refuse and report rather than violate the safety pillar.
+		if (this.isProtected(b)) return void reports.push(clamp(kind, [id], "protected", `${label(b)} is in the protected working tail`));
 		b.autoFolded = true;
 		b.subst = content;
 		b.by = by;
@@ -519,7 +539,8 @@ export class AccordionStore {
 		if (!b) return void reports.push(clamp(kind, [id], "unknown-id", `no block ${id}`));
 		if (b.override !== null) return void reports.push(clamp(kind, [id], "human-override", `${label(b)} is held by the human`));
 		if (this.groupWire.has(id)) return void reports.push(clamp(kind, [id], "grouped", `${label(b)} is inside a folded group`));
-		if (!b.autoFolded && b.subst === undefined) return; // already live — silent no-op
+		// Already live: the documented contract is to REPORT the no-op, not silently swallow it.
+		if (!b.autoFolded && b.subst === undefined) return void reports.push(clamp(kind, [id], "noop", `${label(b)} is already live`));
 		b.autoFolded = false;
 		b.subst = undefined;
 		if (b.by === "auto" || b.by === "conductor") b.by = null;
@@ -754,14 +775,17 @@ export class AccordionStore {
 			if (this.groupAt.get(id)) return null; // overlap with an existing group
 		}
 		if (memberIds.length < 2) return null;
-		const g: Group = { id: `g:${memberIds[0]}`, memberIds, folded: true };
+		const g: Group = { id: `g:${memberIds[0]}`, memberIds, folded: true, by };
 		// A group must actually collapse something. If EVERY member is a split tool-pair half
 		// (its partner sits outside the range), nothing folds into the summary — the tile would
 		// hide live blocks for zero benefit. That isn't a fold; refuse it (ADR 0006 §4: a folded
 		// group replaces its blocks WITH the parent summary).
 		if (this.classifyGroup(g).carrier === null) return null;
 		this.groups = [...this.groups, g];
-		this.emit(by, "grouped", `${memberIds.length} blocks`);
+		// A conductor group is recreated EVERY pass, so emitting "grouped" each time would spam
+		// the activity log — exactly as conductor block-folds emit nothing per fold. Only the
+		// human's one-time group action is logged.
+		if (by === "you") this.emit(by, "grouped", `${memberIds.length} blocks`);
 		this.refold();
 		return g;
 	}

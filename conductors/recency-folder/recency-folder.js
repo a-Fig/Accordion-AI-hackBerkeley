@@ -86,14 +86,17 @@ wss.on("connection", (ws) => {
 		if (msg.type !== "context/update") return; // ignore hello/commandResult/event for this demo
 
 		// Fold oldest, non-protected, not-yet-folded tool_results until under budget.
-		let live = msg.blocks.reduce((n, b) => n + (b.folded ? 0 : b.tokens), 0);
+		// Use the host-supplied liveTokens as the baseline (already accounts for human
+		// folds, folded-group carriers, and digest residue — far more accurate than
+		// recomputing from b.tokens). Each fold saves (b.tokens - b.foldedTokens).
+		let live = msg.liveTokens;
 		const ids = [];
 		for (const b of msg.blocks) {
 			// blocks arrive in conversation order (oldest first)
 			if (live <= msg.budget) break;
 			if (b.kind !== "tool_result" || b.folded || b.protected) continue;
 			ids.push(b.id);
-			live -= b.tokens; // approximate; the host clamps + re-counts exactly
+			live -= (b.tokens - b.foldedTokens); // host clamps + re-counts exactly
 		}
 
 		// A conductor always replies with its COMPLETE desired state, echoing the rev.
