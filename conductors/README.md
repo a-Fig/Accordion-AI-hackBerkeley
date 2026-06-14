@@ -117,7 +117,8 @@ session is currently active.
 | path                  | what                                                                 |
 |-----------------------|----------------------------------------------------------------------|
 | [`contract/`](contract/) | The contract, dependency-free: `conductor.ts` (the in-process `ConductorView` / `Command` / `Conductor`) + `protocol.ts` (the WebSocket messages, which import `Command`/`ViewBlock` so there's one definition). |
-| [`builtin/`](builtin/)   | The default conductor (`builtin.ts`) — the worked example. |
+| [`builtin/`](builtin/)   | The default conductor (`builtin.ts`) — the minimal worked example. |
+| [`cold-score/`](cold-score/) | Relevance-aware in-process conductor — ACT-R scoring + lexical pre-unfold + hysteresis. The second worked example. |
 | [`index.ts`](index.ts)   | The in-process registry (`IN_PROCESS_CONDUCTORS`). Add a line; it appears in the switcher. |
 | [`recency-folder/`](recency-folder/) | The runnable out-of-process (WebSocket) example. |
 
@@ -126,7 +127,31 @@ session is currently active.
 | directory | language | in/out of process | what it does |
 |-----------|----------|-------------------|--------------|
 | [`builtin/`](builtin/) | TypeScript | in-process | **The default + reference.** Folds purely to keep the live context under budget, oldest-first, lowest-value-kind-first (`tool_result` → `thinking` → `text` → `tool_call` → `user`). ~15-line `conduct`; golden-tested byte-identical. |
+| [`cold-score/`](cold-score/) | TypeScript | in-process | **Relevance-aware folder.** ACT-R cold-score ranking + lexical pre-unfold (keep blocks live whose identifiers appear in the protected tail) + per-block hysteresis cooldowns. Emits `fold` commands only. Instance state (recalls / cooldowns) accumulates across `conduct()` calls. See [ADR 0009](../docs/adr/0009-cold-score-conductor.md). |
 | [`recency-folder/`](recency-folder/) | Node.js | out-of-process (WS) | **Wire example.** Folds the oldest non-protected `tool_result` blocks until under budget, and auto-advertises for discovery. Intentionally crude — copy it and grow your own. |
+
+### Cold-score conductor
+
+[`cold-score/`](cold-score/) is a second in-process conductor — a relevance-aware peer to
+the built-in. Where the built-in treats all blocks of the same kind and approximate age as
+interchangeable, the cold-score conductor adds:
+
+- **ACT-R activation scoring** — blocks the agent has retrieved recently (via lexical
+  pre-unfold) decay more slowly, so they fold last.
+- **Lexical pre-unfold** — before the greedy clamp finalises, any just-folded block whose
+  symbols/paths appear in the protected tail is restored and put on a cooldown (at most 4
+  per pass; longest identifier wins).
+- **Hysteresis** — a pre-unfolded block cannot be auto-refolded for 5 turns.
+
+The conductor emits only `fold` commands. Auto-coalesce (collapsing long cold runs into
+`group` stubs) is a planned follow-on; see the roadmap
+([`docs/conductor-rework-roadmap.md`](../docs/conductor-rework-roadmap.md), C1.5) for why
+it requires aligning runs to whole-message boundaries and modelling the host's straggler
+cost before it is safe to emit.
+
+It is the **second worked example** alongside the built-in — read it to see what instance
+state and a multi-pass pipeline look like in a real in-process conductor. The built-in's
+golden test is untouched.
 
 **Convention:** give your conductor its own subdirectory here, pick a stable `id`, and either
 register it in-process (`index.ts`) or — for the WS escape hatch — advertise a registry file

@@ -11,9 +11,11 @@
  * shows up in the switcher and is selectable automatically.
  */
 import { BuiltinConductor } from "./builtin/builtin";
+import { ColdScoreConductor } from "./cold-score/cold-score";
 import type { Conductor } from "./contract";
 
 export { BuiltinConductor } from "./builtin/builtin";
+export { ColdScoreConductor } from "./cold-score/cold-score";
 
 /** A conductor compiled into the app (in-process). */
 export interface InProcessConductor {
@@ -26,6 +28,7 @@ export interface InProcessConductor {
  *  Add a new in-process conductor here — one line — and it appears automatically. */
 export const IN_PROCESS_CONDUCTORS: InProcessConductor[] = [
   { id: "builtin", label: "Built-in", create: () => new BuiltinConductor() },
+  { id: "cold-score", label: "Cold-score", create: () => new ColdScoreConductor() },
 ];
 
 /** Look up an in-process conductor by id (null if not one). */
