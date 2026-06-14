@@ -422,8 +422,8 @@ describe("ColdScoreConductor — built-in unaffected by conductor swap", () => {
 //   Z  = tool_result, turn=1, order=2, tokens=500, foldedTokens=10
 //   P  = text, turn=10, protected, tokens=200, foldedTokens=10, text has SIGNAL_PATH
 //
-// Step 2a folds X,Y,Z (all needed to approach budget; budget still unmet — P is protected).
-// Step 2b: X is in the fold set and matches P's SIGNAL_PATH → pre-unfolded; live goes up.
+// Step 2a folds X,Y,Z to meet budget (live 1700 → 230 ≤ 700; P stays live, it's protected).
+// Step 2b: X is in the fold set and matches P's SIGNAL_PATH → pre-unfolded; live goes back over.
 // Step 3: no remaining unfrozen candidates (Y,Z already folded) → nothing.
 // Step 4: X is the only non-folded candidate → re-folded. Final fold set = {X,Y,Z}.
 // FIX: no recall or cooldown recorded for X (re-folded in relaxed pass).
