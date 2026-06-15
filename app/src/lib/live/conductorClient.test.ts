@@ -92,6 +92,10 @@ beforeEach(() => {
 	savedWS = (globalThis as any).WebSocket;
 	(globalThis as any).WebSocket = FakeWebSocket;
 	FakeWebSocket.last = null;
+	// conductorStatus is module-level $state — reset it so a leaked value from a prior test
+	// can't make a later assertion pass (or flake) by luck of ordering.
+	conductorStatus.text = "";
+	conductorStatus.metrics = {};
 });
 afterEach(() => {
 	(globalThis as any).WebSocket = savedWS;

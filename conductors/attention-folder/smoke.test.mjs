@@ -299,3 +299,45 @@ test("status: context/update → conductor/status with one-line text + metrics",
 	assert.equal(msg.metrics.action, "hold", "metrics.action should be 'hold' under the band");
 	assert.equal(msg.metrics.fullness, 48, "metrics.fullness must reflect the update");
 });
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Test 6: status refresh on confirmation — host/commandResult updates the folded
+// count so the readout never sticks at the pre-epoch count (regression for the
+// "0 folded · last epoch: folded N" self-contradiction).
+// ──────────────────────────────────────────────────────────────────────────────
+test("status: host/commandResult refreshes the folded count after an epoch", async () => {
+	// Force an epoch (10 × 10k = 100k > 90k). Probe disabled → unscored fallback folds.
+	const blocks = Array.from({ length: 10 }, (_, i) =>
+		blk({ id: `confirm_blk_${i}`, kind: "tool_result", tokens: 10_000, foldedTokens: 50, order: i, text: `c ${i}` })
+	);
+
+	ws.send(
+		JSON.stringify({
+			type: "context/update",
+			rev: 11,
+			contextWindow: 100_000,
+			budget: 100_000,
+			liveTokens: 100_000,
+			protectedFromIndex: 0,
+			protectTokens: 0,
+			blocks,
+		})
+	);
+
+	// Capture how many blocks the epoch actually folded.
+	const cmd = await waitForMessage(ws, (m) => m.type === "conductor/commands" && m.rev === 11, 2_000);
+	const foldedN = cmd.commands[0].ids.length;
+	assert.ok(foldedN > 0, "epoch should fold at least one block");
+
+	// Confirm the batch. The conductor must now emit a status reporting the REAL count —
+	// before this it reported 0 folded (the host suppresses the post-fold context/update).
+	ws.send(JSON.stringify({ type: "host/commandResult", rev: 11, reports: [] }));
+
+	const status = await waitForMessage(
+		ws,
+		(m) => m.type === "conductor/status" && m.metrics?.folded === foldedN,
+		2_000
+	);
+	assert.equal(status.metrics.folded, foldedN, "folded count must match the confirmed fold set");
+	assert.match(status.text, new RegExp(`\\b${foldedN} folded`), "text must report the confirmed fold count");
+});

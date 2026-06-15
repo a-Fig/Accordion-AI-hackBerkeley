@@ -221,7 +221,13 @@ wss.on("connection", (ws) => {
 			// is structurally unclampable and `reports` is always empty here. If this conductor ever
 			// emits `replace`/`group`, or folds outside that guard, revisit: a silently-clamped id
 			// recorded here as applied would never be retried.
-			if (msg.rev === state.pendingRev) state.confirmedApplied = state.pendingSet;
+			if (msg.rev === state.pendingRev) {
+				state.confirmedApplied = state.pendingSet;
+				// Refresh the readout now the epoch is CONFIRMED: until this point the status still
+				// reported the pre-epoch fold count (the host suppresses the post-fold context/update,
+				// so without this the line is stuck showing e.g. "0 folded · last epoch: folded 4").
+				sendStatus(ws, state);
+			}
 			return;
 		}
 
