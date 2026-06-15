@@ -124,10 +124,13 @@ session is currently active.
 
 ## Conductors here
 
+> **This table may be out of date.** `ls conductors/` is the authoritative list.
+
 | directory | language | in/out of process | what it does |
 |-----------|----------|-------------------|--------------|
 | [`builtin/`](builtin/) | TypeScript | in-process | **The default + reference.** Folds purely to keep the live context under budget, oldest-first, lowest-value-kind-first (`tool_result` → `thinking` → `text` → `tool_call` → `user`). ~15-line `conduct`; golden-tested byte-identical. |
 | [`cold-score/`](cold-score/) | TypeScript | in-process | **Relevance-aware folder.** ACT-R cold-score ranking + lexical pre-unfold (keep blocks live whose identifiers appear in the protected tail) + per-block hysteresis cooldowns. Emits `fold` commands only. Instance state (recalls / cooldowns) accumulates across `conduct()` calls. See [ADR 0009](../docs/adr/0009-cold-score-conductor.md). |
+| [`attention-folder/`](attention-folder/) | Node.js + Python | out-of-process (WS) | **Attention-based periodic folder.** A Qwen2.5-0.5B probe scores how much the current work tail attends to each older block; the conductor folds the least-attended blocks at deliberate "epochs" rather than every turn, keeping the inference prompt cache stable between folds. Hysteresis band: 70–90% of the context window. See [ADR 0010](../docs/adr/0010-attention-conductor.md) and its own [README](attention-folder/README.md). |
 | [`recency-folder/`](recency-folder/) | Node.js | out-of-process (WS) | **Wire example.** Folds the oldest non-protected `tool_result` blocks until under budget, and auto-advertises for discovery. Intentionally crude — copy it and grow your own. |
 
 ### Cold-score conductor
