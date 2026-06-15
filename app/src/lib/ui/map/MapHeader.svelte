@@ -2,6 +2,7 @@
 	import type { AccordionStore } from "../../engine/store.svelte";
 	import type { BlockKind } from "../../engine/types";
 	import AnimatedNumber from "$lib/ui/AnimatedNumber.svelte";
+	import EditableNumber from "$lib/ui/EditableNumber.svelte";
 	import Icon from "$lib/ui/Icon.svelte";
 	import ConductorMenu from "./ConductorMenu.svelte";
 	import { folding, setFolding } from "$lib/live/folding.svelte";
@@ -172,9 +173,13 @@
 			>
 				<Icon name="lock" size={11} />
 				<span class="kl-text">protect</span>
-				<b class="mono tnum kl-val">{k(store.protectedTokens)}</b>
+				<EditableNumber
+					value={store.protectTokens}
+					format={k}
+					oncommit={(n) => store.setProtect(Math.max(0, Math.min(PROT_MAX, n)))}
+				/>
 				{#if store.protectedTokens !== store.protectTokens}
-					<span class="kl-target tnum">/{k(store.protectTokens)}</span>
+					<span class="kl-target tnum">({k(store.protectedTokens)} actual)</span>
 				{/if}
 			</span>
 
@@ -182,7 +187,11 @@
 				<span class="kl">
 					<Icon name="target" size={11} />
 					<span class="kl-text">budget</span>
-					<b class="mono tnum kl-val">{k(store.budget)}</b>
+					<EditableNumber
+						value={store.budget}
+						format={k}
+						oncommit={(n) => store.setBudget(Math.max(BUDGET_MIN, Math.min(budgetMax, n)))}
+					/>
 				</span>
 				<input
 					type="range"
