@@ -4,6 +4,7 @@
 	import AnimatedNumber from "$lib/ui/AnimatedNumber.svelte";
 	import Icon from "$lib/ui/Icon.svelte";
 	import SegControl from "$lib/ui/SegControl.svelte";
+	import SettingsPanel from "$lib/ui/SettingsPanel.svelte";
 	import { relTime } from "$lib/utils";
 
 	let {
@@ -40,6 +41,7 @@
 	}
 
 	let collapsed = $state(loadCollapsed());
+	let settingsOpen = $state(false);
 
 	$effect(() => {
 		if (typeof localStorage !== "undefined") {
@@ -121,15 +123,26 @@
 					</button>
 				{/each}
 			</div>
-			<button
-				class="rail-btn dot-btn demo-icon"
-				class:sel={demoSelected}
-				title="Demo session (bundled sample)"
-				aria-label="Demo session"
-				onclick={ondemo}
-			>
-				<span class="status-dot demo-dot"></span>
-			</button>
+			<!-- Bottom group: Demo + gear, flush at the rail foot -->
+			<div class="rail-foot">
+				<button
+					class="rail-btn dot-btn demo-icon"
+					class:sel={demoSelected}
+					title="Demo session (bundled sample)"
+					aria-label="Demo session"
+					onclick={ondemo}
+				>
+					<span class="status-dot demo-dot"></span>
+				</button>
+				<button
+					class="rail-btn settings-icon"
+					title="Settings"
+					aria-label="Settings"
+					onclick={() => (settingsOpen = true)}
+				>
+					<Icon name="sliders-horizontal" size={16} />
+				</button>
+			</div>
 		{:else}
 			<div class="icon-list">
 				{#each railCCSessions as s (s.sessionId)}
@@ -144,6 +157,17 @@
 						<Icon name="file-text" size={16} />
 					</button>
 				{/each}
+			</div>
+			<!-- Bottom group: gear only (no Demo in CC mode) -->
+			<div class="rail-foot">
+				<button
+					class="rail-btn settings-icon"
+					title="Settings"
+					aria-label="Settings"
+					onclick={() => (settingsOpen = true)}
+				>
+					<Icon name="sliders-horizontal" size={16} />
+				</button>
 			</div>
 		{/if}
 	{:else}
@@ -264,8 +288,20 @@
 				50 newest · use Open… for older
 			</div>
 		{/if}
+
+		<!-- Settings entry: pinned at the very bottom of the expanded sidebar, always visible -->
+		<div class="settings-foot">
+			<button class="row settings-row" onclick={() => (settingsOpen = true)} title="Open settings">
+				<Icon name="sliders-horizontal" size={13} class="settings-row-icon" />
+				<span class="body">
+					<span class="t1">Settings</span>
+				</span>
+			</button>
+		</div>
 	{/if}
 </aside>
+
+<SettingsPanel open={settingsOpen} onclose={() => (settingsOpen = false)} />
 
 <style>
 	/* ===== Rail shell ===== */
@@ -334,12 +370,19 @@
 		color: var(--accent);
 	}
 	.demo-icon {
-		margin-top: auto;
 		border-style: dashed;
 		border-color: var(--line-strong);
 	}
 	.demo-icon:hover {
 		border-color: var(--accent);
+	}
+	/* Bottom-pinned group in the collapsed rail (Demo + gear in pi; gear only in CC) */
+	.rail-foot {
+		margin-top: auto;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: var(--sp-1);
 	}
 
 	/* ===== Collapsed source pill ===== */
@@ -682,5 +725,42 @@
 	/* ===== Accent icon helper (applied via class prop on Icon) ===== */
 	:global(.accent-icon) {
 		color: var(--accent);
+	}
+
+	/* ===== Settings entry — expanded sidebar ===== */
+	.settings-foot {
+		flex: 0 0 auto;
+		padding: var(--sp-1) var(--sp-2);
+		border-top: 1px solid var(--line);
+	}
+	.settings-row {
+		color: var(--muted);
+	}
+	.settings-row .t1 {
+		color: var(--muted);
+		font-weight: 500;
+	}
+	.settings-row:hover .t1 {
+		color: var(--text);
+	}
+	:global(.settings-row-icon) {
+		color: var(--faint);
+		flex: 0 0 auto;
+		opacity: 0.75;
+	}
+	.settings-row:hover :global(.settings-row-icon) {
+		color: var(--muted);
+		opacity: 1;
+	}
+	.settings-row:focus-visible {
+		outline: none;
+		box-shadow: var(--focus-ring);
+	}
+
+	/* ===== Settings icon — collapsed icon rail ===== */
+	/* margin-top: auto removed — now handled by .rail-foot wrapper */
+	.settings-icon:focus-visible {
+		outline: none;
+		box-shadow: var(--focus-ring);
 	}
 </style>

@@ -123,3 +123,67 @@ export function segmentDisplay(rows: DisplayRow[]): DisplaySegment[] {
 	if (cur) segs.push({ kind: "tiles", rows: cur });
 	return segs;
 }
+
+// ---------------------------------------------------------------------------
+// buildLane — sliver-mode lane grouping helper (pure, no store import)
+// ---------------------------------------------------------------------------
+
+/**
+ * A single item in the sliver-mode lane for a `tiles` segment.
+ *
+ * - `tile`    — a live (non-folded) block rendered as a full square cell.
+ * - `group`   — a collapsed ADR-0006 group row rendered as a group-tile square.
+ * - `cluster` — a contiguous run of folded `block` rows collapsed into one
+ *               summary-square + slivers composite.
+ *
+ * Rules:
+ *   • A `type:"group"` row → always a `group` item (never clustered).
+ *   • A `type:"block"` row where `isFolded(block)` → accumulate into current cluster.
+ *   • A `type:"block"` row where NOT folded → flush any open cluster, then a `tile`.
+ *   • A `type:"group"` row also flushes any open cluster.
+ *   • Trailing cluster is flushed at the end.
+ */
+export type LaneItem =
+	| { kind: "tile"; block: Block }
+	| { kind: "group"; group: Group; members: Block[] }
+	| { kind: "cluster"; blocks: Block[] }; // contiguous folded run, in order
+
+export function buildLane(
+	rows: DisplayRow[],
+	isFolded: (b: Block) => boolean,
+): LaneItem[] {
+	const items: LaneItem[] = [];
+	let pending: Block[] = []; // current open cluster run
+
+	function flushCluster() {
+		if (pending.length > 0) {
+			items.push({ kind: "cluster", blocks: pending });
+			pending = [];
+		}
+	}
+
+	for (const row of rows) {
+		if (row.type === "group") {
+			// A collapsed group tile — flush any open cluster, then emit group item.
+			flushCluster();
+			items.push({ kind: "group", group: row.group, members: row.members });
+		} else if (row.type === "block") {
+			// row.type === "block": tiles-segment rows only contain "block" and "group"
+			// (never "groupOpen" — open groups are band segments handled separately),
+			// but we check explicitly for TypeScript narrowing.
+			const b = row.block;
+			if (isFolded(b)) {
+				// Accumulate into the current cluster run.
+				pending.push(b);
+			} else {
+				// Live block — flush open cluster first.
+				flushCluster();
+				items.push({ kind: "tile", block: b });
+			}
+		}
+		// groupOpen rows never appear in tiles segments; skip defensively if encountered.
+	}
+
+	flushCluster(); // trailing cluster
+	return items;
+}
