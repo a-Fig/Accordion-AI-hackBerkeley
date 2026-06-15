@@ -1644,8 +1644,8 @@
 	/* ---- sliver fold mode ---- */
 
 	/* Lane: a flex-wrap row containing live cells, group tiles, and fold-clusters.
-	   align-items:center ensures cells and the (bubble-padded) clusters share one
-	   vertical centerline. gap mirrors the canvas grid gap (4px). */
+	   align-items:center ensures cells and clusters share one vertical centerline.
+	   gap mirrors the canvas grid gap (4px). */
 	.lane {
 		display: flex;
 		flex-wrap: wrap;
@@ -1657,24 +1657,20 @@
 		pointer-events: none;
 	}
 
-	/* Fold-cluster: a contiguous run of folded blocks shown as one compact object.
-	   Summary tile + packed slivers, held by a calm translucent bubble.
-	   The bubble wraps perfectly — no dead space, no overlay. */
+	/* Fold-cluster: a cocoa summary + its sliver(s) as one compact object. No bubble —
+	   an invisible layout wrapper; proximity (tight 2px gap vs the lane's 4px) is what pairs
+	   the cocoa with its slivers. Still carries the click-routing data attributes. */
 	.fold-cluster {
 		display: inline-flex;
 		flex-wrap: wrap;
 		align-items: center;
 		gap: 2px;
-		padding: 4px;
-		border-radius: 9px;
-		background: rgba(255, 255, 255, 0.035);
-		box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
 		flex: 0 0 auto;
 	}
 
 	/* Summary tile: stands in for the whole folded run; cocoa color signals synthesis.
 	   Reuses .cell.face.fN for dice pips (::before pseudo, no extra markup needed).
-	   No dashed outline — the bubble + darker-than-group color carry the "synthesized" signal. */
+	   No dashed outline — the cocoa color alone carries the "synthesized" signal. */
 	.summary-tile {
 		background: var(--k-summary);
 		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22),
