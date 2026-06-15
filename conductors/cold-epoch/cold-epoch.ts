@@ -25,12 +25,12 @@
  *   2. Update ACT-R recall warmth (every turn): scan the protected tail for
  *      identifiers that reference older blocks. Warmth is accumulated continuously
  *      so it is current when an epoch fires, not just computed at epoch time.
- *   3. Compute projectedLive: token cost if our foldSet were applied, starting
- *      from the host's cleared baseline (view.liveTokens is unfolded; we layer
- *      our folds on top by summing b.folded||foldSet.has(b.id) per block).
- *   4. HOLD while projectedLive ≤ highWater × budget — return the current foldSet
- *      unchanged. Prefix is stable; cache hits.
- *   5. EPOCH when projectedLive > highWater × budget — expand foldSet:
+ *   3. Compute projectedLive: start from view.liveTokens (the host's cleared
+ *      baseline, which correctly accounts for human folds and group costs) and
+ *      subtract the savings from each foldSet member not already host-folded.
+ *   4. HOLD while projectedLive ≤ highWater × cap — return the current foldSet
+ *      unchanged. Prefix is stable; cache hits. (cap = min(budget, contextWindow).)
+ *   5. EPOCH when projectedLive > highWater × cap — expand foldSet:
  *      a. Build candidate list: not in foldSet, foldable kind, eligible, shrinks.
  *      b. Lex-protect: candidates whose text is referenced in the tail — skip
  *         these in the primary pass (fold them only in the relaxed pass if the
@@ -49,11 +49,15 @@ import type { Conductor, ConductorView, ViewBlock, Command } from "../contract";
 import { sortCandidates, type ScoreCtx } from "../cold-score/score";
 import { extractIdentifiers, matchBlocks } from "../cold-score/lexical";
 
-/** The hysteresis band as fractions of the budget. */
+/** The hysteresis band as fractions of the effective cap (min of budget and contextWindow). */
 export const EPOCH_CFG = {
 	highWater: 0.9, // cross this → run a fold epoch
 	lowWater: 0.7,  // epoch folds down to roughly here
 };
+
+/** Warmth-scan hysteresis — mirrors cold-score's rate-limiting of recall accumulation. */
+const WARMTH_COOLDOWN_TURNS = 5;
+const MAX_WARMTH_RECORDS_PER_TURN = 4;
 
 /** Kinds that may be folded (mirrors cold-score and attention-folder). */
 const FOLDABLE_KINDS: ReadonlySet<ViewBlock["kind"]> = new Set<ViewBlock["kind"]>([
@@ -74,12 +78,16 @@ export class ColdEpochConductor implements Conductor {
 	/** ACT-R recall history: block id → turn numbers at which it was found in the tail. */
 	private recalls = new Map<string, number[]>();
 
+	/** Per-block cooldown: block id → turn until which no new recall may be recorded. */
+	private warmthCoolUntil = new Map<string, number>();
+
 	conduct(view: ConductorView): Command[] {
 		const byId = new Map(view.blocks.map((b) => [b.id, b]));
 
 		// ── 1. Prune stale ids ──────────────────────────────────────────────────
 		for (const id of [...this.foldSet]) if (!byId.has(id)) this.foldSet.delete(id);
 		for (const id of [...this.recalls.keys()]) if (!byId.has(id)) this.recalls.delete(id);
+		for (const id of [...this.warmthCoolUntil.keys()]) if (!byId.has(id)) this.warmthCoolUntil.delete(id);
 
 		// Drop from foldSet any block the host won't honour. Human/agent overrides
 		// always win; the block re-enters as a candidate only if a future epoch
@@ -97,25 +105,33 @@ export class ColdEpochConductor implements Conductor {
 		// Scan the protected tail for identifiers that reference older blocks.
 		// Runs every turn so warmth is current when an epoch fires — not computed
 		// only at epoch time (which would miss recall signals from quiet turns).
+		// Rate-limited: per-block cooldown + per-turn cap prevent unbounded growth.
 		const tailText = buildTailText(view.blocks);
 		const tailIds = extractIdentifiers(tailText);
 		if (tailIds.size > 0) {
 			const allCands = view.blocks.filter(
-				(b) => FOLDABLE_KINDS.has(b.kind) && !b.held && !b.protected,
+				(b) => FOLDABLE_KINDS.has(b.kind) && !b.held && !b.protected && !b.grouped,
 			);
+			let recorded = 0;
 			for (const bid of matchBlocks(tailIds, allCands).keys()) {
+				if (recorded >= MAX_WARMTH_RECORDS_PER_TURN) break;
+				if ((this.warmthCoolUntil.get(bid) ?? 0) > T) continue;
 				const arr = this.recalls.get(bid);
-				if (!arr) { this.recalls.set(bid, [T]); continue; }
-				if (!arr.includes(T)) arr.push(T);
+				if (!arr) { this.recalls.set(bid, [T]); }
+				else if (!arr.includes(T)) arr.push(T);
+				this.warmthCoolUntil.set(bid, T + WARMTH_COOLDOWN_TURNS);
+				recorded++;
 			}
 		}
 
 		// ── 3. Compute projected live with our foldSet applied ──────────────────
-		// view.liveTokens is the unfolded baseline (host clears the previous
-		// conductor pass before building the view). We project by summing
-		// foldedTokens for blocks that are human-folded (b.folded) or in our set.
+		// Start from the host's cleared baseline and subtract savings for each
+		// foldSet member that isn't already host-folded (b.folded covers human
+		// folds and collapsed group members — those savings are already in
+		// view.liveTokens, so we only subtract our own additions).
 		const projected = projectedLive(view, this.foldSet);
-		const highTok = EPOCH_CFG.highWater * view.budget;
+		const cap = Math.min(view.budget, view.contextWindow ?? Infinity);
+		const highTok = EPOCH_CFG.highWater * cap;
 
 		// ── 4. HOLD — prefix is stable, cache is warm ──────────────────────────
 		if (projected <= highTok) {
@@ -123,7 +139,7 @@ export class ColdEpochConductor implements Conductor {
 		}
 
 		// ── 5. EPOCH — expand foldSet down to lowWater ─────────────────────────
-		const lowTok = EPOCH_CFG.lowWater * view.budget;
+		const lowTok = EPOCH_CFG.lowWater * cap;
 
 		// call-pair warmth: a block whose callId appears in the protected tail gets
 		// a warmth bonus (it's part of an active call chain).
@@ -172,16 +188,17 @@ export class ColdEpochConductor implements Conductor {
 }
 
 /**
- * Projected live token count if `foldSet` were applied on top of the current state.
- * Blocks the host has already folded (b.folded — human overrides) contribute
- * foldedTokens; our foldSet adds more on top; everything else is full tokens.
+ * Projected live token count if `foldSet` were applied on top of the host's
+ * cleared baseline. Starts from `view.liveTokens` (which already accounts for
+ * human folds, group costs, and stragglers correctly) and subtracts the savings
+ * from each foldSet member that isn't already host-folded.
  */
 function projectedLive(view: ConductorView, foldSet: Set<string>): number {
-	let t = 0;
+	let live = view.liveTokens;
 	for (const b of view.blocks) {
-		t += b.folded || foldSet.has(b.id) ? b.foldedTokens : b.tokens;
+		if (foldSet.has(b.id) && !b.folded) live += b.foldedTokens - b.tokens;
 	}
-	return t;
+	return live;
 }
 
 /** Concatenate protected-tail text, newest-first, capped at ~32k chars. */
