@@ -170,8 +170,8 @@
 							</span>
 							{#if isLive}
 								<span class="live-chip" class:steering={folding.enabled}>
-									<span class="live-dot" title="Live — connected to pi; folds steer the agent"></span>
-									<span class="live-label">LIVE</span>
+									<span class="live-dot" title={folding.enabled ? "Connected to pi; actively steering the agent's context" : "Connected to pi; passively watching the session"}></span>
+									<span class="live-label">{folding.enabled ? "listening & steering" : "listening"}</span>
 								</span>
 							{:else if isWatching}
 								<span class="live-chip watching">
