@@ -37,7 +37,7 @@ import type {
 } from "../contract";
 
 /** Soft cap on summary output tokens. The host may clamp further. */
-const MAX_SUMMARY_TOKENS = 1500;
+const MAX_SUMMARY_TOKENS = 8000;
 
 /**
  * System prompt for the compaction LLM call. Industry-standard template asking for a
@@ -78,10 +78,11 @@ and filler. The output will be placed directly into the agent's context window.`
 export class NaiveCompactionConductor implements Conductor {
 	readonly id = "compaction-naive";
 	readonly label = "Naive compaction";
+	readonly locks = ["human-steering", "agent-unfold"] as const;
 
 	// ── instance state ─────────────────────────────────────────────────────────
 
-	/** Injected by init(); null until the conductor is attached. */
+	/** Injected by attach(); null until the conductor is attached. */
 	private host: ConductorHost | null = null;
 
 	/** The current compaction summary text. Null until the first summary completes. */
@@ -118,12 +119,12 @@ export class NaiveCompactionConductor implements Conductor {
 
 	// ── lifecycle ──────────────────────────────────────────────────────────────
 
-	init(host: ConductorHost): void {
+	attach(host: ConductorHost): void {
 		this.host = host;
 	}
 
-	dispose(): void {
-		// Cancel any in-flight completion so stale results don't call invalidate()
+	detach(): void {
+		// Cancel any in-flight completion so stale results don't call requestRerun()
 		// after the conductor is detached.
 		if (this.inflight) {
 			this.inflight.abort();
@@ -135,7 +136,7 @@ export class NaiveCompactionConductor implements Conductor {
 	// ── main conduct loop ─────────────────────────────────────────────────────
 
 	conduct(view: ConductorView): Command[] | null {
-		// Cannot operate without a host (e.g. headless test without init).
+		// Cannot operate without a host (e.g. headless test without attach).
 		if (!this.host) return null;
 
 		// The THRESHOLD at which compaction is triggered: 95 % of the token budget.
@@ -176,42 +177,12 @@ export class NaiveCompactionConductor implements Conductor {
 		}
 
 		// DEGRADE path: if the host cannot run completions (live model not connected),
-		// fall back to a deterministic `group` command over the contiguous aged run.
-		// This is visually useful (collapses the aged region into a host-generated digest)
-		// without requiring a model call, and lets the conductor still be attached in
-		// read-only / transcript sessions.
+		// report unavailability by preserving the current state.
+		// No deterministic grouping fallback: this conductor is specifically the LLM-summary
+		// baseline, so if the host cannot complete we wait visibly rather than silently
+		// switching strategies.
 		if (!this.host.can("complete")) {
-			// group requires ≥ 2 aged survivor blocks that form a clean contiguous ungrouped run.
-			// If there is a pre-existing group interleaved in the aged region, the host's outward
-			// snap would make the group command invalid → `invalid-group` clamp → silent no-op.
-			// To avoid producing a false degrade, only emit the group when the aged survivors
-			// form a clean run (no interleaved grouped blocks in the aged region).
-			//
-			// Limitation: we approximate "clean run" as no grouped blocks in the age region at all.
-			// (agedBlocks already excludes grouped blocks; if ANY block between first and last
-			// aged survivor IS grouped, the host's snap would sweep it in and clamp → we bail.)
-			if (agedBlocks.length < 2) return this.summary !== null ? this.buildCommands(view) : [];
-
-			// Check if there are any grouped blocks sitting between the first and last aged block
-			// in conversation order. Those would be swept into the host's outward snap and cause
-			// an invalid-group clamp.
-			const firstIdx = view.blocks.indexOf(agedBlocks[0]);
-			const lastIdx = view.blocks.indexOf(agedBlocks[agedBlocks.length - 1]);
-			let hasInterleaved = false;
-			for (let i = firstIdx; i <= lastIdx; i++) {
-				if (view.blocks[i].grouped) {
-					hasInterleaved = true;
-					break;
-				}
-			}
-			if (hasInterleaved) {
-				// Can't form a clean group — bail rather than emit a clamp-destined command.
-				return this.summary !== null ? this.buildCommands(view) : [];
-			}
-
-			const firstId = agedBlocks[0].id;
-			const lastId = agedBlocks[agedBlocks.length - 1].id;
-			return [{ kind: "group", ids: [firstId, lastId] }];
+			return this.summary !== null ? this.buildCommands(view) : [];
 		}
 
 		// FIX 3: Gate the launch on a stable signature of the NEWLY AGED set being attempted
@@ -315,7 +286,7 @@ export class NaiveCompactionConductor implements Conductor {
 	/**
 	 * Fire-and-forget: build the compaction prompt and launch a host.complete() call.
 	 * conduct() returns immediately after calling this; the result comes back via the
-	 * resolve handler which calls host.invalidate() to schedule a fresh conduct() pass.
+	 * resolve handler which calls host.requestRerun() to schedule a fresh conduct() pass.
 	 *
 	 * @param agedBlocks - all aged blocks at launch time (SNAPSHOT — don't use the view later).
 	 * @param newlyAged  - subset not already in compactedIds (used to build the recursive prompt).
@@ -361,7 +332,7 @@ export class NaiveCompactionConductor implements Conductor {
 				this.compactedIds = launchedAgedIds;
 				// Ask the host to re-run conduct() now so the replace commands take effect
 				// immediately rather than waiting for the next natural context change.
-				this.host?.invalidate();
+				this.host?.requestRerun();
 			},
 			(_err) => {
 				// Rejected (abort, network error, unknown model, etc.): clear inflight but
@@ -371,8 +342,8 @@ export class NaiveCompactionConductor implements Conductor {
 				// the next attach. This prevents a tight model-hammering loop on a
 				// persistent failure.
 				this.inflight = null;
-				// Note: if this.host is null here, dispose() was called mid-flight — that
-				// is fine, the abort() in dispose() will cause the reject branch, and we
+				// Note: if this.host is null here, detach() was called mid-flight — that
+				// is fine, the abort() in detach() will cause the reject branch, and we
 				// simply clear inflight and exit.
 			},
 		);

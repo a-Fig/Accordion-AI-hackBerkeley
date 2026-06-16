@@ -9,13 +9,13 @@
  *   1. Under threshold, no aged region → conduct returns []; complete never called.
  *   2. Over threshold with aged region and can("complete")===true →
  *        first conduct launches exactly one complete and returns null (hold);
- *        after resolve + invalidate, next conduct returns replace commands.
+ *        after resolve + requestRerun, next conduct returns replace commands.
  *   3. Idempotent re-emit: same replace set returned without calling complete again.
  *   4. Recursive/amnesiac: second compaction prompt contains prior summary + newly
  *      aged text but NOT the text of the first batch's original blocks.
  *   5. No double-launch: while complete is pending, further conducts do not re-call it.
- *   6. Degrade path: can("complete")===false, ≥2 aged → group command; no complete.
- *   7. dispose() aborts an in-flight completion (AbortSignal becomes aborted).
+ *   6. Unavailable path: can("complete")===false → preserve current state; no complete.
+ *   7. detach() aborts an in-flight completion (AbortSignal becomes aborted).
  *   8. Summary replace content carries no {# FOLDED tag.
  *   9. Held / grouped blocks are excluded from the aged region.
  *  10. Threshold boundary (95%).
@@ -106,7 +106,7 @@ interface MockHostOptions {
 class MockHost implements ConductorHost {
 	canComplete: boolean;
 	completeCalls: CompletionRequest[] = [];
-	invalidateCalls = 0;
+	requestRerunCalls = 0;
 	countTokensCalls = 0;
 	digestOfCalls: string[] = [];
 
@@ -114,10 +114,10 @@ class MockHost implements ConductorHost {
 	pending: PendingCompletion[] = [];
 
 	/**
-	 * When set, calling invalidate() immediately invokes this callback.
-	 * Used by tests to simulate the host re-invoking conduct() after invalidate.
+	 * When set, calling requestRerun() immediately invokes this callback.
+	 * Used by tests to simulate the host re-invoking conduct() after requestRerun.
 	 */
-	onInvalidate: (() => void) | null = null;
+	onRequestRerun: (() => void) | null = null;
 
 	constructor(opts: MockHostOptions = {}) {
 		this.canComplete = opts.canComplete ?? true;
@@ -145,9 +145,9 @@ class MockHost implements ConductorHost {
 		return `{#digest FOLDED} digest of ${id}`;
 	}
 
-	invalidate(): void {
-		this.invalidateCalls++;
-		this.onInvalidate?.();
+	requestRerun(): void {
+		this.requestRerunCalls++;
+		this.onRequestRerun?.();
 	}
 
 	/** Resolve the oldest pending completion with the given text. */
@@ -175,7 +175,7 @@ describe("NaiveCompactionConductor — under threshold / no aged region", () => 
 	it("returns [] when liveTokens < 95% budget with no aged blocks", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		// No aged blocks, well under budget.
 		const view = makeView([], [vb("tail0")], 100_000, 10_000);
@@ -188,7 +188,7 @@ describe("NaiveCompactionConductor — under threshold / no aged region", () => 
 	it("returns [] when there are aged blocks but liveTokens is below threshold (no prior summary)", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		// liveTokens = 94900, budget = 100000 → 94.9% < 95% → no trigger.
 		// With aged blocks present but no prior summary, needSummary=false — the conductor
@@ -204,7 +204,7 @@ describe("NaiveCompactionConductor — under threshold / no aged region", () => 
 	it("returns [] when aged blocks exist but liveTokens is well under threshold (no prior summary)", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		// Same as above — conductor has a definite "nothing to compact" answer → []. FIX 1.
 		const aged = [vb("a0"), vb("a1")];
@@ -215,9 +215,9 @@ describe("NaiveCompactionConductor — under threshold / no aged region", () => 
 		expect(host.completeCalls).toHaveLength(0);
 	});
 
-	it("returns null when host is not provided (no init call)", () => {
+	it("returns null when host is not provided (no attach call)", () => {
 		const c = new NaiveCompactionConductor();
-		// No init() call → host is null → must return null per implementation
+		// No attach() call → host is null → must return null per implementation
 		const view = makeView([vb("a0")], [vb("tail0")], 100_000, 96_000);
 		const result = c.conduct(view);
 
@@ -231,7 +231,7 @@ describe("NaiveCompactionConductor — first compaction cycle", () => {
 	it("over threshold with aged blocks: first conduct launches exactly one complete and returns null", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1"), vb("a2")];
 		// liveTokens = 96000 ≥ 0.95 * 100000
@@ -244,10 +244,10 @@ describe("NaiveCompactionConductor — first compaction cycle", () => {
 		expect(host.pending).toHaveLength(1);
 	});
 
-	it("after completion resolves and invalidate fires, next conduct returns replace commands", async () => {
+	it("after completion resolves and requestRerun fires, next conduct returns replace commands", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("a0", { order: 0 }), vb("a1", { order: 1 }), vb("a2", { order: 2 })];
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
@@ -257,17 +257,17 @@ describe("NaiveCompactionConductor — first compaction cycle", () => {
 		expect(host.pending).toHaveLength(1);
 
 		// Resolve the completion
-		let conductCalledAfterInvalidate = false;
-		host.onInvalidate = () => {
-			conductCalledAfterInvalidate = true;
+		let conductCalledAfterRequestRerun = false;
+		host.onRequestRerun = () => {
+			conductCalledAfterRequestRerun = true;
 		};
 		host.resolveNext("Summary text from the model.");
 
 		// Wait for the microtask (promise resolution)
 		await Promise.resolve();
 
-		expect(conductCalledAfterInvalidate).toBe(true);
-		expect(host.invalidateCalls).toBe(1);
+		expect(conductCalledAfterRequestRerun).toBe(true);
+		expect(host.requestRerunCalls).toBe(1);
 
 		// Now conduct again — should return replace commands
 		const result = c.conduct(view);
@@ -299,7 +299,7 @@ describe("NaiveCompactionConductor — first compaction cycle", () => {
 	it("summary replace content carries no {# FOLDED tag (irreversible, no recovery handle)", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1")];
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
@@ -326,7 +326,7 @@ describe("NaiveCompactionConductor — first compaction cycle", () => {
 	it("summary preamble includes the count of compacted messages", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1"), vb("a2"), vb("a3")];
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
@@ -351,7 +351,7 @@ describe("NaiveCompactionConductor — idempotent re-emit", () => {
 	it("repeated conduct calls after summary exists return same replace set without calling complete again", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1")];
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
@@ -381,7 +381,7 @@ describe("NaiveCompactionConductor — idempotent re-emit", () => {
 	it("returns same commands even when liveTokens drops below threshold (once compacted, stays compacted)", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1")];
 		// Over threshold for first compaction
@@ -409,7 +409,7 @@ describe("NaiveCompactionConductor — recursive compaction (amnesia)", () => {
 	it("second compaction prompt contains prior summary and newly aged text but NOT original first-batch text", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		// First batch: a0, a1 are aged; tail0 is protected
 		const a0 = vb("a0", { text: "ORIGINAL BLOCK A0 CONTENT" });
@@ -446,7 +446,7 @@ describe("NaiveCompactionConductor — recursive compaction (amnesia)", () => {
 	it("second compaction uses prior summary section header and newly-added section header", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1")];
 		const view1 = makeView(aged, [vb("tail0")], 100_000, 96_000);
@@ -470,7 +470,7 @@ describe("NaiveCompactionConductor — recursive compaction (amnesia)", () => {
 	it("second compaction's replace commands cover ALL aged blocks (a0+a1+b0), not just b0", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const a0 = vb("a0", { order: 0 });
 		const a1 = vb("a1", { order: 1 });
@@ -505,7 +505,7 @@ describe("NaiveCompactionConductor — no double-launch while in-flight", () => 
 	it("while a complete is pending, further conduct calls do not call complete again", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1")];
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
@@ -521,7 +521,7 @@ describe("NaiveCompactionConductor — no double-launch while in-flight", () => 
 	it("all conduct calls while in-flight return null (hold state)", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1")];
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
@@ -540,7 +540,7 @@ describe("NaiveCompactionConductor — no double-launch while in-flight", () => 
 	it("after rejection, does NOT re-launch on the next conduct with the SAME aged set", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1")];
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
@@ -559,7 +559,7 @@ describe("NaiveCompactionConductor — no double-launch while in-flight", () => 
 	it("after rejection, returns [] (not null) on subsequent conduct with same aged set", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1")];
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
@@ -581,7 +581,7 @@ describe("NaiveCompactionConductor — no double-launch while in-flight", () => 
 	it("after rejection, DOES re-launch when a NEW aged block arrives (attempt key changes)", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1")];
 		const view1 = makeView(aged, [vb("tail0")], 100_000, 96_000);
@@ -599,45 +599,39 @@ describe("NaiveCompactionConductor — no double-launch while in-flight", () => 
 	});
 });
 
-// ── 6. Degrade path ───────────────────────────────────────────────────────────
+// ── 6. Unavailable path ───────────────────────────────────────────────────────
 
-describe("NaiveCompactionConductor — degrade path (can(complete)===false)", () => {
-	it("emits a group command (not replace) and never calls complete when can returns false", () => {
+describe("NaiveCompactionConductor — unavailable path (can(complete)===false)", () => {
+	it("returns [] and never calls complete when can returns false before a summary exists", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost({ canComplete: false });
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1"), vb("a2")];
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
 		const result = c.conduct(view);
 
 		expect(host.completeCalls).toHaveLength(0);
-		expect(result).not.toBeNull();
-		expect(Array.isArray(result)).toBe(true);
-
-		const hasGroup = result!.some((cmd) => cmd.kind === "group");
-		expect(hasGroup).toBe(true);
+		expect(result).toEqual([]);
 	});
 
-	it("group command covers the first and last aged block ids", () => {
+	it("does not fall back to a deterministic group command", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost({ canComplete: false });
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("first0"), vb("mid1"), vb("last2")];
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
 		const result = c.conduct(view)!;
 
-		const group = result.find((cmd) => cmd.kind === "group") as { ids: string[] } | undefined;
-		expect(group).toBeDefined();
-		expect(group!.ids).toContain("first0");
-		expect(group!.ids).toContain("last2");
+		expect(result.some((cmd) => cmd.kind === "group")).toBe(false);
+		expect(result).toEqual([]);
 	});
 
 	it("returns [] (not null) when there is fewer than 2 aged blocks in degrade mode", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost({ canComplete: false });
-		c.init(host);
+		c.attach(host);
 
 		// can("complete")===false and agedBlocks.length < 2 → can't form a group, no summary.
 		// Conductor has a definite "nothing to compact" answer → [] (clear to raw). FIX 3.
@@ -652,7 +646,7 @@ describe("NaiveCompactionConductor — degrade path (can(complete)===false)", ()
 	it("degrade with 0 aged blocks returns [] (nothing to group)", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost({ canComplete: false });
-		c.init(host);
+		c.attach(host);
 
 		const view = makeView([], [vb("tail0")], 100_000, 96_000);
 		const result = c.conduct(view);
@@ -664,7 +658,7 @@ describe("NaiveCompactionConductor — degrade path (can(complete)===false)", ()
 	it("degrade returns [] (not group) when there are interleaved grouped blocks between first and last aged block", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost({ canComplete: false });
-		c.init(host);
+		c.attach(host);
 
 		// The aged region has non-grouped blocks, but between first and last there is a
 		// grouped block (which agedBlocks filtering excluded). The host's outward snap
@@ -690,13 +684,13 @@ describe("NaiveCompactionConductor — degrade path (can(complete)===false)", ()
 	});
 });
 
-// ── 7. dispose() aborts in-flight completion ─────────────────────────────────
+// ── 7. detach() aborts in-flight completion ─────────────────────────────────
 
-describe("NaiveCompactionConductor — dispose() lifecycle", () => {
-	it("dispose() aborts the AbortSignal passed to in-flight complete", async () => {
+describe("NaiveCompactionConductor — detach() lifecycle", () => {
+	it("detach() aborts the AbortSignal passed to in-flight complete", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1")];
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
@@ -709,15 +703,15 @@ describe("NaiveCompactionConductor — dispose() lifecycle", () => {
 		expect(signal!.aborted).toBe(false);
 
 		// Disposing should abort the signal
-		c.dispose();
+		c.detach();
 
 		expect(signal!.aborted).toBe(true);
 	});
 
-	it("after dispose(), invalidate from a late-resolving completion does not cause errors", async () => {
+	it("after detach(), requestRerun from a late-resolving completion does not cause errors", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1")];
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
@@ -725,9 +719,9 @@ describe("NaiveCompactionConductor — dispose() lifecycle", () => {
 		c.conduct(view);
 		const pending = host.pending[0];
 
-		c.dispose();
+		c.detach();
 
-		// Late resolution after dispose() — should be silently ignored
+		// Late resolution after detach() — should be silently ignored
 		// (the abort causes the rejection branch, not resolution, but let's
 		// verify that if somehow the resolve fires it doesn't throw)
 		await expect(async () => {
@@ -736,25 +730,25 @@ describe("NaiveCompactionConductor — dispose() lifecycle", () => {
 		}).not.toThrow();
 	});
 
-	it("dispose() with no in-flight completion is a no-op (does not throw)", () => {
+	it("detach() with no in-flight completion is a no-op (does not throw)", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
-		expect(() => c.dispose()).not.toThrow();
+		expect(() => c.detach()).not.toThrow();
 	});
 
-	it("after dispose(), conduct() returns null (no host)", () => {
+	it("after detach(), conduct() returns null (no host)", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
-		c.dispose();
+		c.attach(host);
+		c.detach();
 
 		const aged = [vb("a0")];
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
 		const result = c.conduct(view);
 
-		// host is null after dispose → returns null per the early guard
+		// host is null after detach → returns null per the early guard
 		expect(result).toBeNull();
 	});
 });
@@ -765,7 +759,7 @@ describe("NaiveCompactionConductor — prompt construction", () => {
 	it("first prompt contains section header and block text for all aged blocks", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const aged = [
 			vb("a0", { text: "user: do the thing", kind: "user" }),
@@ -787,7 +781,7 @@ describe("NaiveCompactionConductor — prompt construction", () => {
 	it("system prompt is the compaction template (not empty)", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const view = makeView([vb("a0")], [vb("tail0")], 100_000, 96_000);
 		c.conduct(view);
@@ -804,7 +798,7 @@ describe("NaiveCompactionConductor — prompt construction", () => {
 	it("maxOutputTokens is set to a positive number", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const view = makeView([vb("a0")], [vb("tail0")], 100_000, 96_000);
 		c.conduct(view);
@@ -817,7 +811,7 @@ describe("NaiveCompactionConductor — prompt construction", () => {
 	it("AbortSignal is passed to each complete call", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const view = makeView([vb("a0")], [vb("tail0")], 100_000, 96_000);
 		c.conduct(view);
@@ -834,7 +828,7 @@ describe("NaiveCompactionConductor — held / grouped block exclusion", () => {
 	it("held blocks (human override) are not included in the aged region", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const held = vb("held0", { held: true });
 		const aged = vb("aged0");
@@ -851,7 +845,7 @@ describe("NaiveCompactionConductor — held / grouped block exclusion", () => {
 	it("grouped blocks are not included in the aged region", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const grouped = vb("grp0", { grouped: true });
 		const aged = vb("aged0");
@@ -866,7 +860,7 @@ describe("NaiveCompactionConductor — held / grouped block exclusion", () => {
 	it("when ALL aged blocks are held, aged region is empty → returns [] with no complete", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		// Only held blocks in the aged region
 		const aged = [vb("h0", { held: true }), vb("h1", { held: true })];
@@ -884,7 +878,7 @@ describe("NaiveCompactionConductor — threshold boundary (95%)", () => {
 	it("triggers at exactly 95% (liveTokens === 0.95 * budget)", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		// 95000 / 100000 = exactly 95%
 		const view = makeView([vb("a0"), vb("a1")], [vb("tail0")], 100_000, 95_000);
@@ -898,7 +892,7 @@ describe("NaiveCompactionConductor — threshold boundary (95%)", () => {
 	it("does NOT trigger at 94.999% (just below threshold) — returns [] (no summary, aged blocks present)", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		// Under threshold with aged blocks and no prior summary → conductor has a definite
 		// "nothing to compact" answer → [] (clear to raw). FIX 1.
@@ -937,7 +931,7 @@ describe("NaiveCompactionConductor — data-loss regression (FIX 1)", () => {
 	}> {
 		const conductor = new NaiveCompactionConductor();
 		const host = new MockHost();
-		conductor.init(host);
+		conductor.attach(host);
 
 		const h = vb("h", { order: 0 });
 		const a = vb("a", { order: 1 });
@@ -1050,7 +1044,7 @@ describe("NaiveCompactionConductor — head grouped/protected re-homing (FIX 1)"
 	it("when head becomes grouped, summary re-homes to next oldest survivor; head not referenced", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const h = vb("h", { order: 0 });
 		const a = vb("a", { order: 1 });
@@ -1083,7 +1077,7 @@ describe("NaiveCompactionConductor — head grouped/protected re-homing (FIX 1)"
 	it("when head becomes protected, it's excluded from survivors; summary re-homes to next", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const h = vb("h", { order: 0 });
 		const a = vb("a", { order: 1 });
@@ -1122,7 +1116,7 @@ describe("NaiveCompactionConductor — head grouped/protected re-homing (FIX 1)"
 	it("when ALL compacted blocks are grouped, returns [] (no empties, no lone summary)", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const h = vb("h", { order: 0 });
 		const a = vb("a", { order: 1 });
@@ -1154,7 +1148,7 @@ describe("NaiveCompactionConductor — tool_call exclusion (FIX 2)", () => {
 	it("tool_call blocks in the aged region are never included in the compaction prompt", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const toolCall = vb("tc0", { kind: "tool_call", text: "TOOL_CALL_CONTENT", tokens: 500 });
 		const text = vb("t0", { kind: "text", text: "regular text block" });
@@ -1178,7 +1172,7 @@ describe("NaiveCompactionConductor — tool_call exclusion (FIX 2)", () => {
 	it("tool_call blocks are never used as the summary head", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		// tool_call is the very first aged block (lowest order) — must NOT become head
 		const toolCall = vb("tc0", { kind: "tool_call", order: 0, tokens: 500 });
@@ -1209,7 +1203,7 @@ describe("NaiveCompactionConductor — tool_call exclusion (FIX 2)", () => {
 	it("conductor never emits replace(tool_call_id, '') — not as head, not as empty", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		// Mix of tool_call, text, tool_result in aged region
 		const tc = vb("tc", { kind: "tool_call", order: 0, tokens: 200 });
@@ -1233,7 +1227,7 @@ describe("NaiveCompactionConductor — tool_call exclusion (FIX 2)", () => {
 	it("when aged region is ONLY tool_call blocks, returns [] (nothing to compact)", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		// Only tool_call blocks aged — after exclusion, agedBlocks is empty
 		const tc1 = vb("tc1", { kind: "tool_call", tokens: 50_000 });
@@ -1259,7 +1253,7 @@ describe("NaiveCompactionConductor — attemptKey keyed on newlyAged (FIX 3)", (
 	it("after rejection, SHRINKING the aged set (human pins old block, no new blocks) does NOT relaunch", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const a0 = vb("a0");
 		const a1 = vb("a1");
@@ -1312,7 +1306,7 @@ describe("NaiveCompactionConductor — attemptKey keyed on newlyAged (FIX 3)", (
 		// b0 ages in → newlyAged=[b0] → launch → reject → then b0 is HELD (shrink of newlyAged):
 		const c2 = new NaiveCompactionConductor();
 		const host2 = new MockHost();
-		c2.init(host2);
+		c2.attach(host2);
 
 		const x0 = vb("x0", { order: 0 });
 		const x1 = vb("x1", { order: 1 });
@@ -1347,7 +1341,7 @@ describe("NaiveCompactionConductor — attemptKey keyed on newlyAged (FIX 3)", (
 	it("after rejection, adding a genuinely NEW aged block must relaunch (attempt key changes)", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const a0 = vb("a0");
 		const a1 = vb("a1");
@@ -1372,7 +1366,7 @@ describe("NaiveCompactionConductor — attemptKey keyed on newlyAged (FIX 3)", (
 	it("after successful compaction, new block ages in → newlyAged=[new] → new attempt key → relaunch", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
-		c.init(host);
+		c.attach(host);
 
 		const a0 = vb("a0");
 		const a1 = vb("a1");

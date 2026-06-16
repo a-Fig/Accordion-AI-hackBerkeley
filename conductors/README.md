@@ -106,6 +106,33 @@ privileged richer input — so reading it teaches you the whole interface. The f
 (the `ConductorView` / `ViewBlock` field tables, every command, the clamp reasons) is the
 first half of [`docs/conductor-protocol.md`](../docs/conductor-protocol.md).
 
+## Calling a model from a conductor (host capabilities)
+
+A conductor can request an out-of-band model completion via the `ConductorHost` injected
+through the optional `init(host)` lifecycle hook. The full reference — the `ConductorHost`
+method table, `CompletionRequest`/`CompletionResult` fields, `can()` availability, the wire
+transport for out-of-process conductors, and the version notes — is in
+[**Part 3 of `docs/conductor-protocol.md`**](../docs/conductor-protocol.md).
+
+The key pattern in six lines:
+
+```ts
+// conduct() must stay synchronous — kick off async work and return null (hold)
+if (view.liveTokens > view.budget && !this.inflight && this.host?.can("complete")) {
+  const ctrl = new AbortController();
+  this.inflight = ctrl;
+  this.host.complete({ prompt: buildPrompt(view), signal: ctrl.signal })
+    .then(r => { this.inflight = null; this.result = r.text; this.host?.invalidate(); },
+          _  => { this.inflight = null; });
+  return null; // hold until invalidate() triggers the next conduct() pass
+}
+```
+
+**Degradation:** always check `host.can("complete")` before use. It returns `false` in
+browser dev mode, in read-only Claude Code transcript sessions, and whenever the pi
+extension is disconnected. Fall back to a `fold` or `group` command so the conductor
+stays useful even without a live model link. `compaction-naive/` shows the full pattern.
+
 ## Escape hatch: separate process / another language (WebSocket)
 
 Reach for this **only** when an in-process TypeScript class won't do — you need a separate
@@ -139,6 +166,7 @@ session is currently active.
 | [`garbage-collector/`](garbage-collector/) | Reachability-aware in-process conductor — mark-and-sweep from roots over entity/causal/message edges; folds unreachable blocks first. The third worked example. |
 | [`index.ts`](index.ts)   | The in-process registry (`IN_PROCESS_CONDUCTORS`). Add a line; it appears in the switcher. |
 | [`recency-folder/`](recency-folder/) | The runnable out-of-process (WebSocket) example. |
+| [`compaction-naive/`](compaction-naive/) | The naive compaction baseline — lossy LLM summary via `host.complete`. The foil to reversible folding. |
 
 ## Conductors here
 
@@ -152,6 +180,7 @@ session is currently active.
 | [`sliding-window/`](sliding-window/) | TypeScript | in-process | **Hard-delete oldest non-user blocks.** A high-water/low-water band: when the agent-visible window crosses ~90% of budget it issues `group` commands with `digest: null` (DROP) over the oldest non-`user` blocks — skipping user messages, which stay live — down to ~70%, then **holds** (re-emitting the deletes) while the window refills. Carries a monotonic drop-set as instance state. Locks `human-steering` + `agent-unfold` (NOT `tail-size`). Known limitations (bounded, self-correcting straggler/snap overshoot): see [ADR 0006](../docs/adr/0006-multiblock-folds.md#known-limitations-sliding-window). |
 | [`garbage-collector/`](garbage-collector/) | TypeScript | in-process | **Reachability-based folder.** Treats context as a managed heap: roots = protected tail + human-held + the first `user` message; a reference graph (entity identifiers shared with cold-score's extractor, `callId` causal pairs, same-message id-prefix links) seeds a mark phase, and the sweep folds UNREACHABLE candidates first, falling back to reachable ones only under budget pressure. Collaborative (no locks). See [ADR 0012](../docs/adr/0012-garbage-collector-conductor.md). |
 | [`recency-folder/`](recency-folder/) | Node.js | out-of-process (WS) | **Wire example.** Folds the oldest non-protected `tool_result` blocks until under budget, and auto-advertises for discovery. Intentionally crude — copy it and grow your own. |
+| [`compaction-naive/`](compaction-naive/) | TypeScript | in-process | **Naive compaction baseline.** Summarizes aged context into a single prose blob via `host.complete`; lossy + recursive (each compaction only sees the prior summary — compounding amnesia). No `{#code FOLDED}` tag → the agent cannot self-unfold. The intentional foil that reversible folding is designed to beat. |
 
 ### Garbage-collector conductor
 
