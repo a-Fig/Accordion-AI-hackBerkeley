@@ -13,11 +13,13 @@
 import { BuiltinConductor } from "./builtin/builtin";
 import { ColdScoreConductor } from "./cold-score/cold-score";
 import { ColdEpochConductor } from "./cold-epoch/cold-epoch";
+import { SlidingWindowConductor } from "./sliding-window/sliding-window";
 import type { Conductor } from "./contract";
 
 export { BuiltinConductor } from "./builtin/builtin";
 export { ColdScoreConductor } from "./cold-score/cold-score";
 export { ColdEpochConductor } from "./cold-epoch/cold-epoch";
+export { SlidingWindowConductor } from "./sliding-window/sliding-window";
 
 /** A conductor compiled into the app (in-process). */
 export interface InProcessConductor {
@@ -32,6 +34,7 @@ export const IN_PROCESS_CONDUCTORS: InProcessConductor[] = [
   { id: "builtin", label: "Built-in", create: () => new BuiltinConductor() },
   { id: "cold-score", label: "Cold-score", create: () => new ColdScoreConductor() },
   { id: "cold-epoch", label: "Cold epoch", create: () => new ColdEpochConductor() },
+  { id: "sliding-window", label: "Sliding window", create: () => new SlidingWindowConductor() },
 ];
 
 /** Look up an in-process conductor by id (null if not one). */
