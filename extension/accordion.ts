@@ -40,7 +40,7 @@ import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@e
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 import { linearize, applyPlan, type PiMessage } from "../app/src/lib/live/mapping";
-import { DEFAULT_PORT, PROTOCOL_VERSION, type FoldOp, type GroupOp, type ServerMessage, type StreamMessage, type UnfoldRequestMessage, type UnfoldResultMessage, type RecallRequestMessage, type RecallContent } from "../app/src/lib/live/protocol";
+import { DEFAULT_PORT, PROTOCOL_VERSION, type FoldOp, type GroupOp, type ServerMessage, type StreamMessage, type UnfoldRequestMessage, type UnfoldResultMessage, type RecallRequestMessage, type RecallContent, type CompleteRequestMessage, type CompleteResultMessage } from "../app/src/lib/live/protocol";
 
 /** The GUI's reply to a sync: in-place fold ops + group-collapse ops (ADR 0006). */
 type Plan = { ops: FoldOp[]; groups: GroupOp[] };
@@ -491,6 +491,61 @@ export default function accordionLive(pi: ExtensionAPI): void {
 							missing: Array.isArray(msg.missing) ? msg.missing : [],
 						});
 					}
+				}
+				if (msg?.type === "completeRequest" && typeof msg.reqId === "number") {
+					// Out-of-band: fire async and NEVER block the message handler or any hook.
+					// Dynamic import so the module is resolved lazily — at pi load time pi's jiti
+					// alias table maps "@earendil-works/pi-ai" to its bundled copy; the smoke test
+					// never triggers a real model call so it never reaches this import.
+					const req = msg as CompleteRequestMessage;
+					const capturedWs = ws;
+					void (async () => {
+						const reply = (r: CompleteResultMessage): void => {
+							// Only send if this GUI is still the active client (reconnect guard).
+							if (capturedWs === client && capturedWs.readyState === 1) send(capturedWs, r);
+						};
+						try {
+							const ctx = latestCtx;
+							const m = ctx?.model;
+							if (!ctx || !m) {
+								reply({ type: "completeResult", reqId: req.reqId, ok: false, error: "no model available" });
+								return;
+							}
+							const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
+							if (!auth.ok) {
+								reply({ type: "completeResult", reqId: req.reqId, ok: false, error: `could not resolve API key: ${(auth as any).error ?? "unknown"}` });
+								return;
+							}
+							const { complete } = await import("@earendil-works/pi-ai");
+							const context = {
+								systemPrompt: req.system,
+								messages: [{ role: "user" as const, content: req.prompt, timestamp: Date.now() }],
+							};
+							const result = await complete(m, context, {
+								apiKey: auth.apiKey,
+								headers: auth.headers,
+								...(typeof req.maxOutputTokens === "number" ? { maxTokens: req.maxOutputTokens } : {}),
+							});
+							// Extract the first text part (defensive — handle any content shape).
+							let text = "";
+							if (Array.isArray(result.content)) {
+								const textPart = result.content.find((p: any) => p?.type === "text");
+								text = (textPart as any)?.text ?? "";
+							}
+							reply({
+								type: "completeResult",
+								reqId: req.reqId,
+								ok: true,
+								text,
+								model: result.model,
+								inputTokens: typeof result.usage?.input === "number" ? result.usage.input : undefined,
+								outputTokens: typeof result.usage?.output === "number" ? result.usage.output : undefined,
+							});
+						} catch (err: unknown) {
+							const errMsg = err instanceof Error ? err.message : String(err);
+							reply({ type: "completeResult", reqId: req.reqId, ok: false, error: errMsg });
+						}
+					})();
 				}
 			});
 			const drop = () => {
