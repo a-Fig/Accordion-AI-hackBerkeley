@@ -31,6 +31,22 @@
 /** The block kinds, mirrored from the engine so this contract has zero engine dependency. */
 export type ConductorBlockKind = "user" | "text" | "thinking" | "tool_call" | "tool_result";
 
+/** The three steering controls a conductor may take exclusive control of (ADR 0011). */
+export type LockName = "human-steering" | "agent-unfold" | "tail-size";
+
+/** All lockable controls, in canonical order (for UIs that render the lock table). */
+export const LOCK_NAMES: readonly LockName[] = ["human-steering", "agent-unfold", "tail-size"];
+
+/** True if `locks` claims `name`. The single predicate the host/UI use to test a lock. */
+export function hasLock(locks: readonly LockName[] | undefined, name: LockName): boolean {
+	return !!locks && locks.includes(name);
+}
+
+/** True if `locks` declares any lock at all (exclusive vs collaborative). */
+export function isExclusive(locks: readonly LockName[] | undefined): boolean {
+	return !!locks && locks.length > 0;
+}
+
 /** One block as every conductor sees it — pure serializable data, identical in-process and on the wire. */
 export interface ViewBlock {
 	id: string;
@@ -197,5 +213,14 @@ export interface Conductor {
 	readonly id: string;
 	/** Human-facing label for the switcher UI. */
 	readonly label: string;
+	/**
+	 * Involvement locks (ADR 0011): the steering controls this conductor takes EXCLUSIVE
+	 * control of. Undefined / empty ⇒ **collaborative** (the default — human and agent
+	 * overrides always win, today's behavior). A non-empty subset ⇒ **exclusive**: the host
+	 * gates the named controls from the human/agent, the human's only recourse is detach
+	 * (the kill switch), and `tail-size` lets the conductor fold into the protected tail.
+	 * Never includes observation, budget, the agent's `recall`, or detach — those are sacred.
+	 */
+	readonly locks?: readonly LockName[];
 	conduct(view: ConductorView): Command[] | null;
 }

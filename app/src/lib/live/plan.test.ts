@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { AccordionStore } from "../engine/store.svelte";
 import type { Block, BlockKind, ParsedSession } from "../engine/types";
-import { computeFoldOps, resolveUnfold } from "./plan";
+import { computeFoldOps, resolveUnfold, resolveRecall } from "./plan";
 import { isDurableId } from "./mapping";
 import { foldCode } from "../engine/digest";
 
@@ -303,6 +303,103 @@ describe("resolveUnfold", () => {
 		resolveUnfold(s, [foldCode("a:resp1:p0")]);
 		// next plan omits it → the extension sends it full → agent's past context changes
 		expect(computeFoldOps(s).map((o) => o.id)).not.toContain("a:resp1:p0");
+	});
+});
+
+describe("resolveRecall", () => {
+	it("returns the ORIGINAL full text (not the digest) for a folded block and never mutates", () => {
+		order = 0;
+		const ORIGINAL = "THE ORIGINAL FULL CONTENT " + "padding ".repeat(200);
+		const blocks = [
+			blk({ id: "a:resp1:p0", kind: "text", tokens: 8000, text: ORIGINAL }),
+			blk({ id: "r:call1", kind: "tool_result", tokens: 8000, toolName: "grep", callId: "call1" }),
+			blk({ id: "u:1000", kind: "user", tokens: 50, text: "hi" }),
+		];
+		const s = makeStore(blocks);
+		s.setProtect(40);
+		s.setBudget(1000); // fold the old blocks
+		const b = s.get("a:resp1:p0")!;
+		expect(s.isFolded(b)).toBe(true);
+
+		const code = foldCode("a:resp1:p0");
+		const { restored, missing } = resolveRecall(s, [code]);
+
+		expect(restored.length).toBe(1);
+		// the FULL original text comes back — NOT the lossy folded digest
+		expect(restored[0].text).toBe(ORIGINAL);
+		expect(restored[0].text).not.toBe(s.digestOf(b));
+		expect(restored[0].code).toBe(code);
+		expect(restored[0].ids).toEqual(["a:resp1:p0"]);
+		expect(restored[0].label).toContain("text");
+		expect(missing).toEqual([]);
+
+		// READ-ONLY: the block is STILL folded, no override created (vs resolveUnfold)
+		expect(s.isFolded(b)).toBe(true);
+		expect(b.override).toBe(null);
+		expect(b.by).not.toBe("agent");
+	});
+
+	it("reports a non-matching code as missing (and returns nothing for it)", () => {
+		order = 0;
+		const blocks = [
+			blk({ id: "a:resp1:p0", kind: "text", tokens: 8000 }),
+			blk({ id: "u:1000", kind: "user", tokens: 50, text: "hi" }),
+		];
+		const s = makeStore(blocks);
+		s.setProtect(40);
+		s.setBudget(1000);
+
+		const { restored, missing } = resolveRecall(s, ["zzzz"]);
+		expect(restored).toEqual([]);
+		expect(missing).toEqual(["zzzz"]);
+	});
+
+	it("reports an already-full (never-folded) block as missing — recall reads only folded content", () => {
+		order = 0;
+		const blocks = [
+			blk({ id: "a:resp1:p0", kind: "text", tokens: 50, text: "small" }),
+			blk({ id: "u:1000", kind: "user", tokens: 50, text: "hi" }),
+		];
+		const s = makeStore(blocks);
+		s.setBudget(1_000_000); // nothing folds
+		expect(s.isFolded(s.get("a:resp1:p0")!)).toBe(false);
+
+		const code = foldCode("a:resp1:p0");
+		const { restored, missing } = resolveRecall(s, [code]);
+		expect(restored).toEqual([]);
+		expect(missing).toEqual([code]);
+		expect(s.get("a:resp1:p0")!.override).toBe(null); // untouched
+	});
+
+	it("recalls a folded GROUP's members' full content joined (by the group code)", () => {
+		order = 0;
+		const TEXT_A = "FIRST MEMBER ORIGINAL CONTENT";
+		const TEXT_B = "SECOND MEMBER ORIGINAL CONTENT";
+		const blocks = [
+			blk({ id: "a:resp1:p0", kind: "text", tokens: 8000, text: TEXT_A }),
+			blk({ id: "a:resp2:p0", kind: "text", tokens: 8000, text: TEXT_B }),
+			blk({ id: "u:1000", kind: "user", tokens: 50, text: "hi" }),
+		];
+		const s = makeStore(blocks);
+		s.setProtect(40);
+		// Human-group the two old text blocks into one folded group (folded:true by default).
+		const g = s.createGroup("a:resp1:p0", "a:resp2:p0");
+		expect(g).not.toBeNull();
+		expect(g!.folded).toBe(true);
+
+		const code = foldCode(g!.id);
+		const { restored, missing } = resolveRecall(s, [code]);
+
+		expect(restored.length).toBe(1);
+		// the group's members' FULL original text, joined in order
+		expect(restored[0].text).toContain(TEXT_A);
+		expect(restored[0].text).toContain(TEXT_B);
+		expect(restored[0].label).toContain("group");
+		expect(restored[0].ids).toEqual(g!.memberIds);
+		expect(missing).toEqual([]);
+
+		// READ-ONLY: the group is STILL folded
+		expect(s.groupById(g!.id)!.folded).toBe(true);
 	});
 });
 
