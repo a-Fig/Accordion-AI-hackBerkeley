@@ -150,8 +150,8 @@ export function digestTokens(b: Block): number {
  * Token cost of a conductor's substituted content (ADR 0007 — `Block.subst`). Unlike
  * `digest()` this is arbitrary, mutable text the conductor chose, so it is NOT cached on
  * the block (the same id may carry different substitutions over a session). Same
- * estimate + per-block overhead as a digest so accounting is apples-to-apples; `""`
- * (the "delete" form) costs only the structural overhead.
+ * estimate + per-block overhead as a digest so accounting is apples-to-apples. (An empty
+ * "" replace never reaches here — `substOne` folds it to the engine digest instead.)
  */
 export function substTokens(content: string): number {
 	return estTokens(content) + BLOCK_OVERHEAD;

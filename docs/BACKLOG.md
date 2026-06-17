@@ -27,10 +27,11 @@ low-severity (no lie, no reachable regression) and were deliberately deferred:
 - **CSS dedupe.** `@keyframes alarmpulse` is byte-identical to `livepulse`, and `.alarm-dot` ≈
   `.live-dot` (only color + duration differ) in `+page.svelte`. Share one `@keyframes pulse` and
   a `.status-dot` base with `--dot-color`/`--dot-duration`.
-- **Transcript dead "Unfold" for a collapsed folded-group member** (`ContextMap.svelte` ~1082):
-  `folded` is true so the button shows, but `toggle`→`unfold` no-ops inside a folded group.
-  Pre-existing (also true under the old `{#if !prot}`); gate on `(folded && !inFoldedGroup) ||
-  canFold` or route grouped members to `unfoldGroup`.
+- **Dead "Unfold" for a collapsed folded-group member** (`ContextMap.svelte` transcript ~1082
+  AND `Inspector.svelte` block + partner fold buttons): `folded`/`isFolded` is true so the
+  control shows enabled, but `toggle`→`unfold` no-ops inside a folded group. Pre-existing in all
+  three (also true under the old `{#if !prot}` / `disabled={protect}` gates); gate on
+  `(folded && !inFoldedGroup) || canFold`, or route grouped members to `unfoldGroup`.
 - **Hoist the conductor-visible foldable-kind set into the contract.** `cold-score.ts` and
   `cold-epoch.ts` each declare a private `FOLDABLE_KINDS`; with the honest-`foldedTokens` fix
   they no longer *need* it for the shrink decision, but a single `conductors/contract` export

@@ -282,7 +282,7 @@
 						{partner.kind === "tool_result" ? "Result it produced" : "Call that produced this"}
 					</span>
 					<span class="partner-meta tnum">
-						{store.isFolded(partner) ? "folded" : "live"} · {fmt(store.effTokens(partner))} tok
+						{partnerFolded ? "folded" : "live"} · {fmt(store.effTokens(partner))} tok
 					</span>
 				</div>
 
@@ -290,7 +290,7 @@
 					class="action-btn partner-toggle"
 					class:action-disabled={!partnerFolded && !canFoldPartner}
 					disabled={!partnerFolded && !canFoldPartner}
-					title={partnerFolded ? "Unfold partner" : canFoldPartner ? "Fold partner" : partnerProtected ? "Protected — never folded" : "Only text, thinking & tool results can fold"}
+					title={partnerFolded ? "Unfold partner" : canFoldPartner ? "Fold partner" : partnerProtected ? "Protected — never folded" : partner?.override === "pinned" ? "Pinned — unpin to fold" : "Only text, thinking & tool results can fold"}
 					onclick={() => store.toggle(partner!.id)}
 				>
 					<Icon name="corner-down-right" size={14} />
