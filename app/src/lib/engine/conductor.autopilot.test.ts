@@ -14,6 +14,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { AutopilotConductor } from "$conductors/autopilot/autopilot";
+import { IN_PROCESS_CONDUCTORS } from "$conductors";
 import type { ConductorView, ViewBlock } from "$conductors/contract";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -68,6 +69,17 @@ describe("AutopilotConductor — lock declaration", () => {
 		const c = new AutopilotConductor();
 		expect(c.id).toBe("autopilot");
 		expect(c.label).toBe("Autopilot");
+	});
+
+	it("registry entry locks deep-equal instance locks (drift guard)", () => {
+		// The registry declares locks WITHOUT instantiating the conductor (so the UI
+		// can show a consent gate before attaching). If they drift — e.g. registry says
+		// collaborative but the instance locks "human-steering" — the gate is silently
+		// skipped. This test catches that silent drift.
+		const entry = IN_PROCESS_CONDUCTORS.find((c) => c.id === "autopilot");
+		expect(entry).toBeDefined();
+		const instance = new AutopilotConductor();
+		expect(entry!.locks).toEqual([...instance.locks]);
 	});
 });
 
