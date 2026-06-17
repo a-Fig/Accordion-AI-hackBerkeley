@@ -37,6 +37,16 @@
 	// disabled here so the guarantee is visible, not just enforced silently.
 	const protect = $derived(block ? store.isProtected(block) : false);
 
+	// Involvement locks (ADR 0011): under `human-steering` the human's fold / unfold / pin /
+	// group / reset controls are the conductor's, so they show disabled — the honest mirror of
+	// the engine's no-op. Observation (this whole panel's content, the digest, the partner
+	// preview) is NEVER gated; only the mutating buttons are. Drive purely off `store.isLocked`
+	// so it's correct in preview/demo/read-only too.
+	const steerLocked = $derived(store.isLocked("human-steering"));
+	const lockTip = $derived(
+		`Locked by ${store.lockingConductorLabel ?? "the active conductor"} — detach to take back control`,
+	);
+
 	// the call/result partner — they're separate blocks sharing a callId
 	const partner = $derived.by<Block | null>(() => {
 		if (!block?.callId) return null;
@@ -119,16 +129,22 @@
 				{#if group.folded}
 					<button
 						class="action-btn action-primary-group"
+						class:action-disabled={steerLocked}
+						disabled={steerLocked}
+						aria-disabled={steerLocked}
 						onclick={() => store.unfoldGroup(group!.id)}
-						title="Unfold group to context"
+						title={steerLocked ? lockTip : "Unfold group to context"}
 					>
 						<Icon name="chevrons-up-down" size={14} />
 						Unfold to context
 					</button>
 					<button
 						class="action-btn action-danger"
+						class:action-disabled={steerLocked}
+						disabled={steerLocked}
+						aria-disabled={steerLocked}
 						onclick={() => { store.deleteGroup(group!.id); onclose(); }}
-						title="Delete group"
+						title={steerLocked ? lockTip : "Delete group"}
 					>
 						<Icon name="trash-2" size={14} />
 						Delete
@@ -136,16 +152,22 @@
 				{:else}
 					<button
 						class="action-btn"
+						class:action-disabled={steerLocked}
+						disabled={steerLocked}
+						aria-disabled={steerLocked}
 						onclick={() => store.foldGroup(group!.id)}
-						title="Re-fold group"
+						title={steerLocked ? lockTip : "Re-fold group"}
 					>
 						<Icon name="chevrons-down-up" size={14} />
 						Re-fold
 					</button>
 					<button
 						class="action-btn action-danger"
+						class:action-disabled={steerLocked}
+						disabled={steerLocked}
+						aria-disabled={steerLocked}
 						onclick={() => { store.deleteGroup(group!.id); onclose(); }}
-						title="Delete group"
+						title={steerLocked ? lockTip : "Delete group"}
 					>
 						<Icon name="trash-2" size={14} />
 						Delete
@@ -220,9 +242,16 @@
 			<div class="meta-actions">
 				<button
 					class="action-btn"
-					class:action-disabled={protect}
-					disabled={protect}
-					title={protect ? "Protected working tail — never folded" : folded ? "Unfold block" : "Fold block"}
+					class:action-disabled={protect || steerLocked}
+					disabled={protect || steerLocked}
+					aria-disabled={steerLocked}
+					title={steerLocked
+						? lockTip
+						: protect
+							? "Protected working tail — never folded"
+							: folded
+								? "Unfold block"
+								: "Fold block"}
 					onclick={() => store.toggle(block!.id)}
 				>
 					<Icon name={folded ? "chevrons-up-down" : "chevrons-down-up"} size={14} />
@@ -231,8 +260,11 @@
 				<button
 					class="action-btn"
 					class:action-active={pinned}
+					class:action-disabled={steerLocked}
+					disabled={steerLocked}
+					aria-disabled={steerLocked}
 					onclick={() => (pinned ? store.unpin(block!.id) : store.pin(block!.id))}
-					title={pinned ? "Unpin block" : "Pin block (keeps it live)"}
+					title={steerLocked ? lockTip : pinned ? "Unpin block" : "Pin block (keeps it live)"}
 				>
 					<Icon name={pinned ? "pin-off" : "pin"} size={14} />
 					{pinned ? "Unpin" : "Pin"}
@@ -281,9 +313,16 @@
 
 				<button
 					class="action-btn partner-toggle"
-					class:action-disabled={partnerProtected}
-					disabled={partnerProtected}
-					title={partnerProtected ? "Protected — never folded" : store.isFolded(partner) ? "Unfold partner" : "Fold partner"}
+					class:action-disabled={partnerProtected || steerLocked}
+					disabled={partnerProtected || steerLocked}
+					aria-disabled={steerLocked}
+					title={steerLocked
+						? lockTip
+						: partnerProtected
+							? "Protected — never folded"
+							: store.isFolded(partner)
+								? "Unfold partner"
+								: "Fold partner"}
 					onclick={() => store.toggle(partner!.id)}
 				>
 					<Icon name="corner-down-right" size={14} />

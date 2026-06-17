@@ -35,6 +35,16 @@
 		tool_result: "Tool result",
 	};
 
+	// Involvement locks (ADR 0011): under `human-steering` the human's fold/group controls are
+	// the conductor's. Double-click-to-fold becomes a no-op and is not advertised; the inline
+	// transcript Fold button and the range→Group affordance disable. Single-click INSPECT and
+	// group PEEK stay enabled — observation is sacred, never lockable. Drive off `store.isLocked`
+	// so preview/demo/read-only mirror it exactly.
+	const steerLocked = $derived(store.isLocked("human-steering"));
+	const lockTip = $derived(
+		`Locked by ${store.lockingConductorLabel ?? "the active conductor"} — detach to take back control`,
+	);
+
 	// ---- weight as dice faces: every tile is the same square; token weight is
 	//      read as a die face 1–6 (more pips = heavier block). -----------------
 	// Upper-bound labels — a face N tile holds blocks UP TO the listed token count
@@ -320,7 +330,11 @@
 	function tip(b: Block, prot = false): string {
 		const tool = b.toolName ? ` ${b.toolName}` : "";
 		const f = store.isFolded(b) ? ` · folded ${b.tokens}→${store.effTokens(b)}` : "";
-		const action = prot ? "click to inspect · protected — never folds" : "click to inspect · double-click to fold";
+		const action = prot
+			? "click to inspect · protected — never folds"
+			: steerLocked
+				? "click to inspect · folding locked by the conductor"
+				: "click to inspect · double-click to fold";
 		return `${b.kind}${tool} · ${b.tokens.toLocaleString()} tok${f}\n${action}`;
 	}
 	function groupTip(g: Group): string {
@@ -469,8 +483,10 @@
 
 	function handleBlockClick(id: string, shiftKey: boolean) {
 		const bl = store.get(id);
+		// Range-select only exists to build a group — a human-steering action. Under the lock
+		// it's inert; a click just inspects (observation stays). So skip all range bookkeeping.
 		// Range-select is a map-only gesture.
-		if (view === "map" && shiftKey && rangeAnchorId) {
+		if (!steerLocked && view === "map" && shiftKey && rangeAnchorId) {
 			clearPendingClick();
 			if (!bl || store.isProtected(bl) || store.groupOf(bl)) {
 				groupErr = true;
@@ -482,7 +498,8 @@
 		}
 		deferClick(() => {
 			onselect(id);
-			rangeAnchorId = view === "map" && bl && !store.isProtected(bl) && !store.groupOf(bl) ? id : null;
+			rangeAnchorId =
+				!steerLocked && view === "map" && bl && !store.isProtected(bl) && !store.groupOf(bl) ? id : null;
 			rangeEndId = null;
 			groupErr = false;
 		});
@@ -506,6 +523,7 @@
 		_ev: MouseEvent,
 	) {
 		clearPendingClick();
+		if (steerLocked) return; // double-click folds, which is locked — no-op (observation is fine)
 		if (e.kind === "group") {
 			collapseGroup(e.id);
 		} else {
@@ -562,6 +580,7 @@
 
 	function onDbl(e: MouseEvent) {
 		clearPendingClick();
+		if (steerLocked) return; // double-click folds/unfolds — locked → no-op (single-click inspect still works)
 		const hit = resolveHit(e);
 		if (hit.kind === "group") {
 			collapseGroup(hit.gid);
@@ -865,7 +884,9 @@
 
 			<div class="tb-divider"></div>
 
-			<span class="dim" style="font-size:var(--fs-xs)">click = inspect · dbl-click = fold</span>
+			<span class="dim" style="font-size:var(--fs-xs)">
+				{steerLocked ? "click = inspect · folding locked by the conductor" : "click = inspect · dbl-click = fold"}
+			</span>
 		{/if}
 	</div>
 
@@ -1077,8 +1098,11 @@
 							{#if !prot}
 								<button
 									class="tr-btn"
+									class:locked={steerLocked}
+									disabled={steerLocked}
+									aria-disabled={steerLocked}
 									onclick={(e) => { e.stopPropagation(); store.toggle(b.id); }}
-									title={folded ? "Unfold to full text" : "Fold to digest"}
+									title={steerLocked ? lockTip : folded ? "Unfold to full text" : "Fold to digest"}
 								>
 									<Icon name={folded ? "chevrons-up-down" : "chevrons-down-up"} size={12} />
 									{folded ? "Unfold" : "Fold"}
@@ -1860,5 +1884,21 @@
 		opacity: 1;
 		outline: none;
 		box-shadow: var(--focus-ring);
+	}
+	/* human-steering locked: the inline Fold control shows disabled (the honest mirror). */
+	.tr-btn.locked,
+	.tr-btn:disabled {
+		cursor: not-allowed;
+		opacity: 0.4;
+	}
+	.tr-msg:hover .tr-btn.locked,
+	.tr-msg.sel .tr-btn.locked {
+		opacity: 0.4;
+	}
+	.tr-btn.locked:hover,
+	.tr-btn:disabled:hover {
+		color: var(--muted);
+		background: var(--panel-2);
+		border-color: var(--line);
 	}
 </style>
