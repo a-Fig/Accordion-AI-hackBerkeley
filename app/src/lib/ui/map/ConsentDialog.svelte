@@ -57,13 +57,34 @@
 	];
 
 	// Focus the safe default (Cancel) when the dialog mounts; trap Escape → cancel.
+	// Tab / Shift-Tab cycle between the two buttons only (focus trap — the dialog has
+	// role="dialog" aria-modal, but browsers don't enforce the trap automatically).
 	let cancelBtn = $state<HTMLButtonElement>();
+	let confirmBtn = $state<HTMLButtonElement>();
 	$effect(() => {
 		cancelBtn?.focus();
 		function onKey(e: KeyboardEvent): void {
 			if (e.key === "Escape") {
 				e.stopPropagation();
 				oncancel();
+				return;
+			}
+			if (e.key === "Tab") {
+				// Cycle focus between Cancel ↔ confirm (the only two focusable elements).
+				const focused = document.activeElement;
+				if (e.shiftKey) {
+					// Shift-Tab: if on Cancel (or anything else), move to confirm.
+					if (focused === cancelBtn || focused !== confirmBtn) {
+						e.preventDefault();
+						confirmBtn?.focus();
+					}
+				} else {
+					// Tab: if on confirm (or anything else), move to cancel.
+					if (focused === confirmBtn || focused !== cancelBtn) {
+						e.preventDefault();
+						cancelBtn?.focus();
+					}
+				}
 			}
 		}
 		window.addEventListener("keydown", onKey, true);
@@ -72,9 +93,11 @@
 </script>
 
 <!-- Backdrop: a click outside the card cancels (same as the safe default). -->
-<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="consent-backdrop" onclick={oncancel}>
-	<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+	<!-- svelte-ignore a11y_click_events_have_key_events -->
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<div
 		class="consent-card"
 		role="dialog"
@@ -84,7 +107,7 @@
 		onclick={(e) => e.stopPropagation()}
 	>
 		<header class="consent-head">
-			<span class="consent-icon"><Icon name="sliders-horizontal" size={15} /></span>
+			<span class="consent-icon"><Icon name="lock" size={15} /></span>
 			<h2 id="consent-title" class="consent-title"><strong>{label}</strong> wants to take over</h2>
 		</header>
 
@@ -129,7 +152,7 @@
 			<button type="button" class="consent-btn consent-cancel" bind:this={cancelBtn} onclick={oncancel}>
 				Cancel
 			</button>
-			<button type="button" class="consent-btn consent-confirm" onclick={onconfirm}>
+			<button type="button" class="consent-btn consent-confirm" bind:this={confirmBtn} onclick={onconfirm}>
 				Hand over &amp; attach
 			</button>
 		</footer>

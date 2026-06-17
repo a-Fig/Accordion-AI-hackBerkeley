@@ -406,6 +406,14 @@
 			peeked = new Set();
 		});
 	});
+	// ADR 0011: when the human-steering lock becomes active, any pending range must be
+	// cleared immediately — a range selected just before the lock engages would otherwise
+	// linger and mislead the user into a guaranteed-to-fail "Group" attempt.
+	$effect(() => {
+		if (steerLocked) {
+			untrack(() => clearRange());
+		}
+	});
 	$effect(() => {
 		if (view !== "map")
 			untrack(() => {
@@ -600,8 +608,9 @@
 			if (rangeAnchorId) { clearRange(); return; }
 		}
 		// Enter commits a pending range (≥2 blocks) into a group — the keyboard twin of the
-		// "Group N blocks" button, matching the selection chip's hint.
-		if (e.key === "Enter" && rangeCount >= 2) {
+		// "Group N blocks" button, matching the selection chip's hint. No-op under the lock
+		// (ADR 0011: group creation is a human-steering action).
+		if (e.key === "Enter" && rangeCount >= 2 && !steerLocked) {
 			e.preventDefault();
 			handleCreateGroup();
 			return;
@@ -832,22 +841,30 @@
 
 			<span class="grow"></span>
 
-			<!-- Range-select chip / hint -->
+			<!-- Range-select chip / hint.
+			     Under human-steering lock: the Group button and Enter hint are hidden;
+			     only the clear button remains so the user can dismiss the selection.
+			     Observation stays unlocked — range visibility itself is fine; only
+			     creating a group (a steering action) is gated (ADR 0011). -->
 			{#if rangeCount >= 2}
-				<div class="range-bar" class:err={groupErr}>
+				<div class="range-bar" class:err={groupErr && !steerLocked}>
 					<span class="range-chip">
 						<Icon name="corner-down-right" size={11} />
 						<b>{rangeCount}</b> blocks → group
-						<span class="dim">· Enter</span>
+						{#if !steerLocked}<span class="dim">· Enter</span>{/if}
 					</span>
-					{#if groupErr}<span class="range-err">overlaps a group or protected tail</span>{/if}
-					<button class="group-btn" onclick={handleCreateGroup}>Group</button>
+					{#if groupErr && !steerLocked}<span class="range-err">overlaps a group or protected tail</span>{/if}
+					{#if steerLocked}
+						<span class="range-err" title={lockTip}>Locked by conductor</span>
+					{:else}
+						<button class="group-btn" onclick={handleCreateGroup}>Group</button>
+					{/if}
 					<button class="range-clear" onclick={clearRange} title="Clear selection (Esc)">
 						<Icon name="x" size={11} />
 					</button>
 				</div>
 				<div class="tb-divider"></div>
-			{:else if rangeAnchorId}
+			{:else if rangeAnchorId && !steerLocked}
 				<span class="range-hint dim">shift-click to complete range</span>
 				<div class="tb-divider"></div>
 			{/if}

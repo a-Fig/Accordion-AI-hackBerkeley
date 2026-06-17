@@ -50,16 +50,61 @@
 	// deliberate handover, so we hold the selection and show the lock table first. The
 	// pending pick lives here until the user confirms (→ commit the selection) or cancels
 	// (→ drop it, stay on the current conductor). Collaborative picks skip the gate.
-	let pendingConsent = $state<{ id: string; label: string; locks: readonly LockName[] } | null>(null);
+	let pendingConsent = $state<{ id: string; label: string; locks: readonly LockName[]; isRemote?: boolean } | null>(null);
 
 	function confirmConsent(): void {
-		if (pendingConsent) setActiveConductor(pendingConsent.id);
+		if (pendingConsent) {
+			if (pendingConsent.isRemote) {
+				// Remote post-handshake path: already attached — record consent so the effect
+				// doesn't re-prompt. Reassign (new Set) so the $effect dependency re-runs.
+				remoteConsentedIds = new Set([...remoteConsentedIds, pendingConsent.id]);
+			} else {
+				// In-process pre-attach path: commit the selection now.
+				setActiveConductor(pendingConsent.id);
+			}
+		}
 		pendingConsent = null;
 		closeMenu();
 	}
 	function cancelConsent(): void {
-		pendingConsent = null; // revert: never attached, current conductor stays
+		if (pendingConsent?.isRemote) {
+			// Remote post-handshake cancel: detach (kill switch — freezes + unlocks).
+			store?.detach();
+		}
+		pendingConsent = null; // revert: never attached (in-process) or detached (remote)
 	}
+
+	// ── Post-handshake consent for REMOTE exclusive conductors (ADR 0011 §6) ────
+	// Remote conductors only reveal their lock-set in `conductor/hello` (after the WS
+	// handshake), so the in-process pre-attach gate above never sees them. We watch
+	// `store.conductor` reactively; when a remote conductor's locks arrive exclusive we
+	// show the SAME ConsentDialog. On CANCEL we call `store.detach()` (the kill switch —
+	// freezes the current folded view and unlocks every control). On CONFIRM we just
+	// record the id so we don't re-prompt on the same session.
+	//
+	// RESIDUAL: this prompt fires after the handshake, so the remote may apply its first
+	// plan before the user responds. Cancel → detach cleanly freezes/reverts that state.
+	// The engine separately releases held overrides when the remote locks arrive.
+	//
+	// NOTE: launchable external conductors also flow through this path — launching selects
+	// the id, the WS handshake delivers locks, and this effect prompts if exclusive. The
+	// handleLaunch() path deliberately does NOT suppress this gate.
+	// Reassignment-based (not .add()) so the $effect re-runs when new ids are recorded.
+	let remoteConsentedIds = $state(new Set<string>());
+
+	$effect(() => {
+		const cond = store?.conductor;
+		// Guard: no conductor, dialog already open, or conductor is in-process → skip.
+		if (!cond || pendingConsent) return;
+		if (inProcessConductor(cond.id)) return;
+		if (!isExclusive(cond.locks)) return;
+		if (remoteConsentedIds.has(cond.id)) return;
+
+		// Remote exclusive conductor not yet consented — show the post-handshake gate.
+		// `isRemote: true` tells confirmConsent/cancelConsent to use the remote path:
+		// confirm → record as consented (already attached); cancel → store.detach().
+		pendingConsent = { id: cond.id, label: cond.label, locks: cond.locks ?? [], isRemote: true };
+	});
 
 	let rootEl = $state<HTMLDivElement>();
 	let triggerEl = $state<HTMLButtonElement>();
