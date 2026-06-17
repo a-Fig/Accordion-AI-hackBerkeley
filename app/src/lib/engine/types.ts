@@ -98,6 +98,13 @@ export interface Group {
 	 * always sets it (default `"you"`).
 	 */
 	by?: Actor;
+	/**
+	 * Conductor-supplied summary override (mirrors `GroupCommand.digest`):
+	 *   - `undefined` → default recap via `groupDigest` (unchanged behavior).
+	 *   - `null` or `""` → DROP: the run is removed from the wire, no message inserted.
+	 *   - Non-empty string → that exact string is used as the summary verbatim.
+	 */
+	digest?: string | null;
 }
 
 export interface SessionMeta {
