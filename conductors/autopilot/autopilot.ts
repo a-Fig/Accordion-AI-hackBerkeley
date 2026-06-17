@@ -4,16 +4,18 @@
  * AutopilotConductor declares all three involvement locks:
  *   - "human-steering"  — no manual fold/unfold/pin/group/reset from the human
  *   - "agent-unfold"    — the agent's `unfold` tool is gated
- *   - "tail-size"       — the protected-tail dial is locked; the conductor may fold
- *                         recent blocks (the host lifts its tail floor under this lock)
+ *   - "tail-size"       — the protected-tail dial is locked; the conductor owns the tail
+ *                         floor (it declares the size via `tailTokens`)
  *
- * Under the "tail-size" lock the host sets `protectedFromIndex = blocks.length`, so
- * every block arrives with `protected: false`. The candidate filter below therefore
- * naturally includes recent blocks — no special-case needed.
+ * Autopilot omits `tailTokens`, so it reads 0 = "own the whole context, no protected
+ * tail" → the host sets `protectedFromIndex = blocks.length` and every block arrives with
+ * `protected: false`. The candidate filter below therefore naturally includes recent
+ * blocks — no special-case needed. (A `tail-size` conductor with `tailTokens > 0` would
+ * keep that many tokens protected, and folds inside that tail would still be refused.)
  *
  * STRATEGY: Identical to the built-in (oldest-first, lowest-value-kind-first, greedy
- * fold until liveTokens ≤ budget). The ONLY behavioural difference is that it is
- * allowed to fold recent blocks because the tail-size lock lifts the host floor.
+ * fold until liveTokens ≤ budget). The ONLY behavioural difference is that it is allowed
+ * to fold recent blocks — because it declares `tailTokens = 0`, lifting the host floor.
  *
  * This is a PURE function of the view — no `$state`, no store reference, no mutation,
  * no engine reach-in. It consumes ONLY the public `ConductorView`, the same surface any
@@ -52,10 +54,10 @@ export class AutopilotConductor implements Conductor {
 	/**
 	 * Fold lowest-value, oldest candidates until the live context fits the budget.
 	 *
-	 * Identical algorithm to BuiltinConductor — the point is that with the "tail-size"
-	 * lock the host will have set `protectedFromIndex = blocks.length`, so all blocks
-	 * arrive with `protected: false` and the candidate filter naturally reaches recent
-	 * blocks without any extra logic here.
+	 * Identical algorithm to BuiltinConductor — the point is that, because Autopilot
+	 * declares `tailTokens = 0` under the "tail-size" lock, the host sets
+	 * `protectedFromIndex = blocks.length`, so all blocks arrive with `protected: false`
+	 * and the candidate filter naturally reaches recent blocks without any extra logic here.
 	 */
 	conduct(view: ConductorView): Command[] {
 		let live = view.liveTokens;

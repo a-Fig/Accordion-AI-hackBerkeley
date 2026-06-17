@@ -228,7 +228,9 @@ export interface Conductor {
 	 * control of. Undefined / empty ⇒ **collaborative** (the default — human and agent
 	 * overrides always win, today's behavior). A non-empty subset ⇒ **exclusive**: the host
 	 * gates the named controls from the human/agent, the human's only recourse is detach
-	 * (the kill switch), and `tail-size` lets the conductor fold into the protected tail.
+	 * (the kill switch), and `tail-size` hands the conductor ownership of the protected tail —
+	 * it declares the tail size via `tailTokens` (`0` ⇒ no tail, may fold any block; `> 0` ⇒
+	 * folds inside its own declared tail are still refused `protected`).
 	 * Never includes observation, budget, the agent's `recall`, or detach — those are sacred.
 	 */
 	readonly locks?: readonly LockName[];
