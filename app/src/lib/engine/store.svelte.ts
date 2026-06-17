@@ -149,8 +149,8 @@ export class AccordionStore {
 		const w = this.groupWire.get(b.id);
 		if (w) return w.tokens;
 		if (!this.isFolded(b)) return b.tokens;
-		// Folded: a conductor's substitution (incl. "" = delete) costs its own length;
-		// otherwise the engine's per-kind digest.
+		// Folded: a conductor's (non-empty) substitution costs its own length; otherwise the
+		// engine's per-kind digest. (substOne normalizes an empty "" replace to the digest path.)
 		return b.subst !== undefined ? substTokens(b.subst) : digestTokens(b);
 	}
 	/** What a folded block renders / the agent receives: the conductor's substitution if any,
@@ -520,7 +520,8 @@ export class AccordionStore {
 	/**
 	 * Fold/replace one block by content substitution. `content === undefined` (a fold with
 	 * no digest) marks it folded via the engine digest — byte-identical to the old
-	 * auto-folder; a string (incl. "") substitutes that exact content.
+	 * auto-folder; a non-empty string substitutes that exact content; an empty string `""`
+	 * can't be a wire content part, so it folds to the engine digest too (see the body).
 	 */
 	private substOne(id: string, content: string | undefined, by: Actor, kind: "fold" | "replace", reports: ClampReport[]): void {
 		const b = this.get(id);
