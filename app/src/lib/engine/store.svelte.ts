@@ -234,10 +234,16 @@ export class AccordionStore {
 	/**
 	 * ADR 0011 consent → baseline. Clear standing human/agent overrides in the domains the
 	 * attaching conductor locks: under `human-steering` every HUMAN override (pin / manual
-	 * fold / manual unfold) is released; under `agent-unfold` every AGENT sticky unfold is
-	 * released. Conductor-owned state (`subst`/`autoFolded`, `by:"auto"/"conductor"`) is left
-	 * for the normal `clearConductorState` reset in the refold that follows. No-op when the
-	 * conductor locks nothing — so collaborative attach is unchanged.
+	 * fold / manual unfold) AND every human-owned GROUP is released; under `agent-unfold` every
+	 * AGENT sticky unfold is released. Conductor-owned state (`subst`/`autoFolded`,
+	 * `by:"auto"/"conductor"`) is left for the normal `clearConductorState` reset in the refold
+	 * that follows. No-op when the conductor locks nothing — so collaborative attach is unchanged.
+	 *
+	 * Human groups are part of the `human-steering` domain (a multiblock fold is human steering),
+	 * so they must be released too — otherwise a stale human group sits in the conductor's field
+	 * and `createGroup` (which refuses overlap with ANY existing group) clamps the conductor's own
+	 * group over that range, blocking it from authoring the very view the lock handed it. Legacy
+	 * absent-`by` groups are treated as human here, the same as everywhere else.
 	 */
 	private releaseLockedDomains(locks: readonly LockName[]): void {
 		const lockHuman = hasLock(locks, "human-steering");
@@ -251,6 +257,13 @@ export class AccordionStore {
 				b.by = null;
 				b.subst = undefined;
 			}
+		}
+		// Release human-owned (and legacy absent-`by`) groups so the conductor authors from a clean
+		// field. Conductor groups (`by:"auto"/"conductor"`) are not the human's to release here —
+		// `clearConductorState` rebuilds those from the next pass's `group` commands.
+		if (lockHuman && this.groups.length) {
+			const kept = this.groups.filter((g) => g.by === "auto" || g.by === "conductor");
+			if (kept.length !== this.groups.length) this.groups = kept;
 		}
 	}
 
@@ -317,11 +330,16 @@ export class AccordionStore {
 		for (const b of this.blocks) {
 			if (b.override !== null) continue; // human already owns it — leave as-is
 			if (!this.isFolded(b)) continue; // live (or straggler in an open group) — nothing to freeze
-			// Skip members of a folded group — the group itself is the frozen view (see below).
-			// Individually freezing them would stamp `override:"folded"` on `user`/`tool_call`
-			// members, which is illegal on the wire (`wireFoldable` refuses non-foldable kinds
-			// as per-block folds) and creates a view↔wire divergence.
-			if (this.groupAt.has(b.id)) continue;
+			// Skip members of a FOLDED group — that group itself is the frozen view (reassigned to
+			// the human below), and individually stamping `override:"folded"` on a `user`/`tool_call`
+			// member would be illegal on the wire (`wireFoldable` refuses non-foldable kinds as
+			// per-block folds) — the view↔wire divergence this repo forbids. But a member of an
+			// OPEN group that the conductor folded INDIVIDUALLY has no folded-group view to preserve
+			// it, so it MUST be frozen here like any other block (it is necessarily a foldable kind —
+			// `substOne`'s `wireFoldable` gate is the only way it got folded). Gate on the group's
+			// FOLDED state, not mere membership, or such a fold reopens on the next pass (the kill
+			// switch would fail to freeze it — @a-Fig review, comment 1 variant).
+			if (this.inFoldedGroup(b.id)) continue;
 			b.override = "folded";
 			b.by = "you";
 			b.subst = undefined;

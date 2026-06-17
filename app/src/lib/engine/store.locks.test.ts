@@ -362,10 +362,75 @@ describe("ADR 0011 — attach releases human/agent holds in locked domains only"
 		expect(s.get("m0:p0")!.override).toBe(null); // agent unfold released
 		expect(s.get("m1:p0")!.override).toBe("pinned"); // human pin NOT touched (different axis)
 	});
+
+	it("human-steering releases human GROUPS too, so the conductor can author over that range (@a-Fig comment 2)", () => {
+		const s = makeStore(Array.from({ length: 5 }, (_, i) => blk(i)));
+		s.setProtect(0);
+		const g = s.createGroup("m0:p0", "m1:p0"); // human group, by:"you"
+		expect(g).not.toBeNull();
+		expect(s.groups.length).toBe(1);
+
+		// Collaborative attach leaves the human group intact (no lock to release it).
+		const sCollab = makeStore(Array.from({ length: 5 }, (_, i) => blk(i)));
+		sCollab.setProtect(0);
+		sCollab.createGroup("m0:p0", "m1:p0");
+		sCollab.attach(new LockingConductor([]));
+		expect(sCollab.groups.length).toBe(1);
+
+		// human-steering attach releases the human group → clean field for the conductor.
+		const c = new LockingConductor(["human-steering"]);
+		// The conductor wants to author its OWN group over the same range — which createGroup
+		// refuses on overlap. Releasing the human group is what lets it land.
+		c.cmds = [{ kind: "group", ids: ["m0:p0", "m1:p0"] }];
+		s.attach(c);
+		// The stale human group is gone, replaced by the conductor's own.
+		expect(s.groups.length).toBe(1);
+		expect(s.groups[0].by).toBe("auto"); // conductor-authored, not the leftover human group
+		expect(s.groups[0].folded).toBe(true);
+	});
+
+	it("agent-unfold lock does NOT release human groups (only human-steering does)", () => {
+		const s = makeStore(Array.from({ length: 5 }, (_, i) => blk(i)));
+		s.setProtect(0);
+		s.createGroup("m0:p0", "m1:p0");
+		s.attach(new LockingConductor(["agent-unfold"])); // different axis
+		expect(s.groups.length).toBe(1); // human group survives — agent-unfold is not its domain
+		expect(s.groups[0].by).toBe("you");
+	});
 });
 
 // ── detach: freeze, not reset-to-raw ─────────────────────────────────────────
 describe("ADR 0011 — detach freezes the folded view and unlocks", () => {
+	it("freezes a conductor's individual fold of an OPEN-group member (no folded group to carry it) (@a-Fig comment 1 variant)", () => {
+		const s = makeStore(Array.from({ length: 5 }, (_, i) => blk(i)));
+		s.setProtect(0); // no tail — isolate the freeze behavior
+		// Human group over m0,m1, then UNFOLD it → an OPEN human group.
+		const g = s.createGroup("m0:p0", "m1:p0");
+		expect(g).not.toBeNull();
+		s.unfoldGroup(g!.id);
+		expect(s.groupById(g!.id)!.folded).toBe(false);
+		// A conductor folds m0 INDIVIDUALLY (allowed — an open group isn't in groupWire).
+		const c = new LockingConductor([]);
+		c.cmds = [{ kind: "fold", ids: ["m0:p0"] }];
+		s.attach(c);
+		expect(s.isFolded(s.get("m0:p0")!)).toBe(true);
+		const liveFolded = s.liveTokens;
+
+		s.detach(); // kill switch must FREEZE the view, not let m0 reopen
+
+		const m0 = s.get("m0:p0")!;
+		expect(s.isFolded(m0)).toBe(true); // still folded — frozen, not reopened
+		expect(m0.override).toBe("folded"); // individually frozen (the open group can't carry it)
+		expect(m0.by).toBe("you");
+		expect(m0.subst).toBeUndefined();
+		expect(m0.autoFolded).toBe(false);
+		expect(s.liveTokens).toBe(liveFolded); // budget not re-blown
+		// And it's individually reversible by hand post-detach.
+		s.unfold("m0:p0");
+		expect(s.isFolded(s.get("m0:p0")!)).toBe(false);
+	});
+
+
 	it("conductor-folded blocks become sticky human folds and survive; controls unlock", () => {
 		const s = makeStore(Array.from({ length: 5 }, (_, i) => blk(i)));
 		s.setProtect(0);
