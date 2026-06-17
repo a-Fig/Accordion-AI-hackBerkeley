@@ -57,8 +57,11 @@ Treat everything in it as immutable.
 folds** — the host clears the previous conductor pass before building the view, so it is a
 clean baseline. `protectedFromIndex` / `protectTokens` surface the host's protected working
 tail as *policy*: you may honour it (the built-in treats it as a hard "don't fold past here"
-line) or ignore it — absent the `tail-size` lock (ADR 0011), folding into the tail will be
-reverted by host healing; under the lock, the tail is yours to manage.
+line) or ignore it. Without the `tail-size` lock (ADR 0011), folding into the tail is reverted
+by host healing. With the lock, the tail is the conductor's own declared `tailTokens`:
+`tailTokens = 0` means no protected tail (you may fold any block), but folds inside a
+`tailTokens > 0` tail are still refused with `protected` — you own the tail's *size*, not a
+licence to fold into it.
 
 A **`ViewBlock`** is one block as every conductor sees it — identical in-process and on the
 wire:
@@ -136,7 +139,7 @@ A **`ClampReport`** is `{ command, ids, reason, detail }`. `reason` is one of:
 | `human-override` | a human pin / manual fold / manual unfold owns the block — the human wins      |
 | `grouped`        | the block is inside a folded group; the group overlay owns it                  |
 | `invalid-group`  | a `group`'s ids were not a valid contiguous, ungrouped, ≥2-member run          |
-| `protected`      | the block is inside the protected working tail; the host refuses to fold it (absent the `tail-size` lock — see ADR 0011) |
+| `protected`      | the block is inside the active protected working tail; the host refuses to fold it. Without `tail-size` this is the human's `protectTokens` tail; with `tail-size` it is the conductor's declared `tailTokens` tail (`tailTokens = 0` ⇒ no tail, no `protected` clamps). See ADR 0011 |
 | `noop`           | the command was a no-op (e.g. restoring an already-live block)                 |
 
 In-process, `conduct()` returns and the host applies synchronously; the clamp reports are

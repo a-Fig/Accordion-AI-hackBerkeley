@@ -224,8 +224,12 @@ did NOT lock."** Concretely:
 - `ClampReason: "human-override"` fires **only in unlocked domains.** Under the
   `human-steering` lock there are no human overrides to win — the UI refuses the action and
   the engine refuses it, so none are ever created.
-- `ClampReason: "protected"` fires **only when `tail-size` is NOT locked.** Under the lock,
-  the tail is conductor policy, not a host floor, so folding a recent block is allowed.
+- `ClampReason: "protected"` fires for blocks inside the **currently active** protected tail.
+  Without `tail-size`, that tail is the human's `protectTokens`. With `tail-size`, that tail is
+  the conductor's declared `tailTokens`. So a `tail-size` conductor with `tailTokens = 0` has no
+  protected tail and may fold recent blocks; a conductor with `tailTokens > 0` **still** gets
+  `protected` clamps inside its own declared tail. The lock transfers ownership of the tail floor
+  to the conductor; it does not remove the floor except when the conductor chooses `tailTokens = 0`.
 - The **foldability gate stays in ONE place** (the engine) and remains the single predicate
   shared by `fold()` / `isFolded` / `computeFoldOps`. It simply gains the active conductor's
   lock-set as an input. There is **never a stricter rule on the wire than in the view, and
