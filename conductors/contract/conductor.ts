@@ -106,9 +106,12 @@ export interface FoldCommand {
 }
 
 /**
- * Substitute a block's content with arbitrary text the conductor chose. `content: ""`
- * is the safe form of "delete" — the block stays in place (so its callId/pairing is
- * intact) but contributes (almost) nothing.
+ * Substitute a block's content with arbitrary text the conductor chose. The block stays in
+ * place (so its callId/pairing is intact). `content: ""` means "shrink to nothing": an empty
+ * content part can't be sent to the provider, so the host folds the block to its standard
+ * `{#code FOLDED}` digest (the smallest wire-safe form) — guaranteeing the view always matches
+ * what the agent receives. Only `text`/`thinking`/`tool_result` fold; a `replace` on a
+ * `user`/`tool_call` is clamped `not-foldable`.
  */
 export interface ReplaceCommand {
 	kind: "replace";

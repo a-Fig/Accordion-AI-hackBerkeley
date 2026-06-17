@@ -455,7 +455,9 @@ export class AccordionStore {
 	 * is no privileged richer input. Per-block flags fold the host's policy into plain bools
 	 * so a conductor needn't call any engine helper: `held` = a human override owns it,
 	 * `folded` = currently rendered folded, `protected` = inside the working tail, `grouped`
-	 * = member of a folded group, `foldedTokens` = the digest's token cost.
+	 * = member of a folded group, `foldedTokens` = the digest's token cost (or full `tokens`
+	 * for a non-foldable kind, which cannot shrink — so a conductor's `foldedTokens < tokens`
+	 * shrink test naturally skips `user`/`tool_call` and never proposes a fold the host clamps).
 	 */
 	private buildView(protectedFrom: number): ConductorView {
 		const blocks = this.blocks.map((b, i) => ({
@@ -464,7 +466,7 @@ export class AccordionStore {
 			turn: b.turn,
 			order: b.order,
 			tokens: b.tokens,
-			foldedTokens: digestTokens(b),
+			foldedTokens: wireFoldable(b) ? digestTokens(b) : b.tokens,
 			toolName: b.toolName,
 			callId: b.callId,
 			isError: b.isError,
@@ -536,7 +538,11 @@ export class AccordionStore {
 		// whole. That is the exact divergence the host must make unrepresentable.
 		if (!wireFoldable(b)) return void reports.push(clamp(kind, [id], "not-foldable", `${label(b)} is a ${b.kind}; only text/thinking/tool_result fold on the wire`));
 		b.autoFolded = true;
-		b.subst = content;
+		// An empty replacement can't be represented on the wire — a fold must leave a non-empty
+		// content part (`computeFoldOps` drops an empty digest), so `subst=""` would recess the
+		// tile and count the saving while the agent still receives the block whole. Fall back to
+		// the engine digest (the smallest wire-safe form) so the view matches what the wire sends.
+		b.subst = content === "" ? undefined : content;
 		b.by = by;
 	}
 

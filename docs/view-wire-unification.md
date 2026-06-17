@@ -1,9 +1,10 @@
 # View ↔ Wire unification — make the UI structurally unable to lie
 
-**Status:** **Slice 1 LANDED** (the shared kind predicate that kills the `tool_call` lie via
-both fold doors, plus the alarm). Slice 2 (group-balance unification, protect-tail unit
-reconciliation, id-format reconciliation) is a defined fast-follow, not yet built. Stricter
-finish (Option C) remains deferred.
+**Status:** **Slice 1 + 1.1 LANDED** (the shared kind predicate that kills the `tool_call` lie
+via both fold doors, the alarm, and the code-review follow-ups: Inspector `canFold`, honest
+`foldedTokens`, empty-`replace`→digest, and the wire path routed through `wireFoldable`).
+Slice 2 (group-balance unification, protect-tail unit reconciliation, id-format reconciliation)
+is a defined fast-follow, not yet built. Stricter finish (Option C) remains deferred.
 **Date:** 2026-06-16
 **Owner decision:** yes to Option A now, with the alarm as the standing guardrail; Option C
 is a deferred finish, taken only if the alarm ever fires in real use or the render layer is
@@ -24,6 +25,42 @@ positional-id divergence), an indicator-only slow-flashing red dot by the wordma
 dev-only `console.error`. The alarm deliberately does **not** verify folded-group straggler
 balance — that's the extension's structural guard + Slice 2. Golden (`conductor.builtin`) stayed
 byte-identical; the gate is a no-op on foldable-kind candidates.
+
+## Slice 1.1 — code-review fixes (2026-06-17)
+
+A max-effort review of the Slice 1 PR (#45) surfaced four issues where the kind gate had
+landed but its rollout was incomplete or a second divergence vector remained. PM call: fix the
+four that complete the thesis ("structurally unable to lie") or close a reachable regression;
+defer the low-severity cleanup to Slice 2 (see [BACKLOG.md](BACKLOG.md)).
+
+- **Inspector fold buttons now gate on `canFold`.** Slice 1 wired `canFold` into `ContextMap`
+  (Map grid + transcript) but missed `Inspector.svelte` — its "Fold block" / "Fold partner"
+  buttons gated only on protection, so a live `user`/`tool_call` showed an enabled Fold button
+  that silently no-op'd. Both now consult `store.canFold` (unfold of an already-folded block
+  always stays). The lie was already closed by the store gate; this closes the dead-control gap.
+- **`ConductorView.foldedTokens` is honest for non-foldable kinds** (`= tokens`, since they
+  can't shrink). The default **builtin** conductor's candidate filter (`foldedTokens < tokens`)
+  has no kind guard, so when over-budget *beyond* what foldable kinds can save it proposed
+  folding `tool_call`/`user`; the Slice 1 `substOne` gate then clamped each `"not-foldable"` and
+  `runConductor` logged it **every refold pass** (activity-log spam). Fixing `foldedTokens` at
+  the view — the one surface every conductor consumes — makes that proposal impossible for
+  builtin, cold-score, cold-epoch, and any future conductor at once, with no per-conductor kind
+  knowledge. Golden stayed byte-identical (its fixture never descends that far).
+- **Empty `replace` folds to the engine digest, not `""`.** `wireFoldable` is kind-only and
+  `substOne` had no empty-content guard, so a conductor `replace(id, "")` (the documented
+  "delete" form) on a foldable durable block read folded (~0 tokens) while `computeFoldOps`
+  dropped the empty digest → the agent received it whole: the residual per-block lie the kind
+  gate didn't cover. `substOne` now normalizes `""` to a plain fold (the `{#code FOLDED}` digest,
+  the smallest wire-safe form), so view == wire; the contract doc is updated to match.
+- **The wire path now actually consults `wireFoldable`.** `computeFoldOps` and `resolveUnfold`
+  called `FOLDABLE_KINDS.has(b.kind)` directly while the `wireFoldable` docblock claimed they
+  "consult" it — a single-source drift vector and a false docblock (CLAUDE.md "one gate"). Both
+  now call `wireFoldable(b)`, so the gate is genuinely single-sourced across view and wire.
+
+Tests: `store.foldgate.test.ts` gains `foldedTokens`-honesty + builtin-never-proposes +
+empty-`replace` round-trip cases; `conductor.test.ts`'s empty-`replace` test moves from the old
+"emptied" assertion to the digest fallback. svelte-check 0/0, vitest 326/326, golden
+byte-identical, extension smoke PASS.
 
 The sections below are the original design; they remain the reference for the Slice 2 items.
 
@@ -53,7 +90,7 @@ says folded; agent got it whole.
 |---|---|---|---|---|
 | Kind gate (`FOLDABLE_KINDS` = text/thinking/tool_result only) | yes | no | **yes** | **CLOSED** — both fold doors gate on `wireFoldable`; alarm Layer 1 backstops |
 | Durable-id only (`isDurableId`) | yes | no | **yes** | **alarmed** (live Layer 2 fires on the rare non-durable-live fold); view-side gating deferred to Slice 2 (id-format reconcile) |
-| Empty-digest skip | yes | no | yes (rare) | unchanged (wire-side in `computeFoldOps`) |
+| Empty-digest skip | yes | no | yes (rare) | **CLOSED (1.1)** — empty `replace` folds to the engine digest in `substOne`, so view==wire; the wire-side skip stays as belt-and-suspenders |
 | Recent-message backstop (`PROTECT_RECENT_MSGS` = 2, by message count) | extension, by msgs | engine, by tokens | yes (rare; unit mismatch) | **deferred** to Slice 2 |
 | Group straggler balance | `applyPlan` re-derives | `classifyGroup` | **yes — already documented** ([ADR 0006](adr/0006-multiblock-folds.md) watch items: cross-group split tool-pair makes `savedTokens` understate) | **deferred** to Slice 2; alarm deliberately does NOT verify it |
 

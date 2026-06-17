@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { AccordionStore } from "./store.svelte";
+import { digest, digestTokens } from "./digest";
 import { computeFoldOps } from "../live/plan";
 import type { Conductor, ConductorView, Command } from "$conductors/contract";
 import type { Block, ParsedSession } from "./types";
@@ -48,6 +49,17 @@ class StubConductor implements Conductor {
 	cmds: Command[] | null = [];
 	conduct(_view: ConductorView): Command[] | null {
 		return this.cmds;
+	}
+}
+
+/** Captures the exact `ConductorView` the host hands a conductor (to assert what it sees). */
+class CapturingConductor implements Conductor {
+	readonly id = "capture";
+	readonly label = "Capture";
+	lastView: ConductorView | null = null;
+	conduct(view: ConductorView): Command[] {
+		this.lastView = view;
+		return [];
 	}
 }
 
@@ -244,5 +256,58 @@ describe("end-to-end — the gate kills the lie on BOTH the view and the wire", 
 		expect(reports).toHaveLength(0); // foldable kind → no clamp
 		expect(s.isFolded(s.get("r:c1")!)).toBe(true); // folded in the view
 		expect(computeFoldOps(s).map((o) => o.id)).toContain("r:c1"); // AND emitted to the wire
+	});
+});
+
+describe("ConductorView.foldedTokens is honest — a non-foldable kind cannot shrink", () => {
+	it("user / tool_call report foldedTokens === tokens; a foldable kind reports less", () => {
+		const s = makeStore(session());
+		const capture = new CapturingConductor();
+		s.attach(capture); // attach triggers a pass → the view is captured
+		const v = capture.lastView!;
+		const tc = v.blocks.find((b) => b.id === "a:r1:p2")!; // tool_call
+		const u = v.blocks.find((b) => b.id === "u:1")!; // user
+		const txt = v.blocks.find((b) => b.id === "a:r1:p1")!; // text
+		// A block the wire can't fold contributes its FULL tokens if "folded" — so every
+		// conductor's `foldedTokens < tokens` shrink test skips it (no clamp, no log spam).
+		expect(tc.foldedTokens).toBe(tc.tokens);
+		expect(u.foldedTokens).toBe(u.tokens);
+		// A foldable kind genuinely shrinks.
+		expect(txt.foldedTokens).toBeLessThan(txt.tokens);
+	});
+
+	it("the default builtin conductor never proposes a non-foldable fold, even severely over budget", () => {
+		const s = makeStore(session()); // builtin is attached on construction
+		s.setProtect(0);
+		s.setBudget(1000); // far below the non-foldable floor → builtin folds all it can, then stops
+		// Every foldable-kind candidate is folded down...
+		expect(s.isFolded(s.get("a:r1:p1")!)).toBe(true); // text
+		expect(s.isFolded(s.get("a:r1:p0")!)).toBe(true); // thinking
+		expect(s.isFolded(s.get("r:c1")!)).toBe(true); // tool_result
+		// ...but user / tool_call are never folded AND never proposed, so the host logs no
+		// `not-foldable` clamp on every refold pass (the regression this guards against).
+		expect(s.isFolded(s.get("a:r1:p2")!)).toBe(false); // tool_call
+		expect(s.isFolded(s.get("u:1")!)).toBe(false); // user
+		expect(s.lastReports.some((r) => r.reason === "not-foldable")).toBe(false);
+	});
+});
+
+describe("empty replace on a FOLDABLE block — folds to the engine digest, never an empty wire part", () => {
+	it("replace(text, \"\") folds to the digest (non-empty); view == wire", () => {
+		const s = makeStore(session());
+		s.setProtect(0);
+		const reports = s.applyCommands([{ kind: "replace", id: "a:r1:p1", content: "" }], "auto");
+		expect(reports).toHaveLength(0); // foldable kind → no clamp
+		const b = s.get("a:r1:p1")!;
+		expect(s.isFolded(b)).toBe(true);
+		// subst="" is normalized away → digestOf falls back to the engine digest, never "".
+		expect(b.subst).toBeUndefined();
+		expect(s.digestOf(b)).toBe(digest(b));
+		expect(s.digestOf(b)).not.toBe("");
+		expect(s.effTokens(b)).toBe(digestTokens(b)); // the real digest cost, not substTokens("")
+		// The wire emits the SAME non-empty fold the view shows — no empty-digest drop, no lie.
+		const op = computeFoldOps(s).find((o) => o.id === "a:r1:p1");
+		expect(op).toBeDefined();
+		expect(op!.digestText).toBe(s.digestOf(b));
 	});
 });
