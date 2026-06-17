@@ -591,6 +591,43 @@ describe("ADR 0011 — Bug #1: in-place remote lock update propagates only via t
 	});
 });
 
+// ── detach freezes a folded group that spans the soon-re-protected tail (BUG FIX) ──────────
+describe("ADR 0011 — detach freezes tail-size conductor's folded group (Bug #2)", () => {
+	it("detach freezes a tail-size conductor's folded group over the tail (budget not re-blown)", () => {
+		// 40 blocks × 1000 tok = 40 000 full tokens. Default protectTokens (~20 000) means
+		// roughly the newest 20 blocks are protected collaboratively. Under tail-size the lock
+		// lifts that floor, so the conductor can group across the tail boundary.
+		const s = makeStore(Array.from({ length: 40 }, (_, i) => blk(i)));
+		// Do NOT call setProtect — keep the default 20 000 token tail.
+
+		const c = new LockingConductor(["tail-size"]);
+		// Group m36..m39 (four recent blocks) — spans the tail the host would re-protect.
+		c.cmds = [{ kind: "group", ids: ["m36:p0", "m37:p0", "m38:p0", "m39:p0"] }];
+		s.attach(c);
+
+		// The group should exist and be folded, and have saved tokens vs. full.
+		expect(s.groups.length).toBe(1);
+		expect(s.groups[0].folded).toBe(true);
+		expect(s.liveTokens).toBeLessThan(s.fullTokens);
+
+		const foldedLive = s.liveTokens;
+
+		s.detach();
+
+		// After detach, liveTokens must stay close to the folded level — NOT spring back to
+		// fullTokens when the group is pruned because the tail re-protects.
+		// Allow up to ~150 tok slack: when the group is pruned the members fall back to
+		// individual digests (instead of one combined group digest), which can differ slightly.
+		expect(Math.abs(s.liveTokens - foldedLive)).toBeLessThan(150);
+		// Belt-and-suspenders: still meaningfully below full (group saved at least 3 digests).
+		expect(s.liveTokens).toBeLessThan(s.fullTokens - 2000);
+
+		// The group members should read as individually frozen folds (group was pruned by the
+		// re-protected tail, but member overrides now hold the freeze).
+		expect(s.isFolded(s.get("m38:p0")!)).toBe(true);
+	});
+});
+
 // ── additivity guard (local sanity; NOT the golden) ──────────────────────────
 describe("ADR 0011 — no lock ⇒ a fold pass is byte-for-byte today's", () => {
 	it("a no-lock conductor folds exactly what the same conductor without the lock field would", () => {

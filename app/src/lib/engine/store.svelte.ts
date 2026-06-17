@@ -284,8 +284,15 @@ export class AccordionStore {
 		this.frozen.clear();
 		for (const b of this.blocks) {
 			if (b.override !== null) continue; // human already owns it — leave as-is
-			if (!this.isFolded(b)) continue; // live; nothing to freeze
-			if (this.groupAt.has(b.id)) continue; // its group is frozen below, not the member
+			if (!this.isFolded(b)) continue; // live (or straggler in an open group) — nothing to freeze
+			// Group members ARE frozen here individually: `isFolded(b)` already skips stragglers
+			// (split tool-pair halves whose `groupWire` entry has collapsed=false), so only truly
+			// collapsed members reach this point. While the group survives, `groupWire` shadows the
+			// individual `override` in `isFolded`/`effTokens` → no visible change, no double-count.
+			// When `pruneProtectedGroups` later drops the group (because it reaches into the
+			// re-protected tail), members fall back to these individual frozen folds instead of
+			// springing back to full — budget preserved. Open-group individually-folded members are
+			// covered by the same path (groupAt includes open-group members too).
 			b.override = "folded";
 			b.by = "you";
 			b.subst = undefined;
