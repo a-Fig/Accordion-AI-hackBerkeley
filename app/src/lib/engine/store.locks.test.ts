@@ -425,6 +425,28 @@ describe("ADR 0011 — detach freeze survives the re-protected tail (FIX 1, BLOC
 		expect(s.isProtected(s.get("m4:p0")!)).toBe(true);
 	});
 
+	it("a redundant second detach() is a no-op — the freeze is NOT wiped (idempotent)", () => {
+		const s = makeStore(Array.from({ length: 5 }, (_, i) => blk(i, "text", 5000)));
+		s.setProtect(20_000);
+		const c = new LockingConductor(["tail-size"]);
+		c.cmds = [{ kind: "fold", ids: ["m3:p0", "m4:p0"] }];
+		s.attach(c);
+		expect(s.isFolded(s.get("m4:p0")!)).toBe(true);
+		const liveFolded = s.liveTokens;
+
+		// cancelConsent calls detach() then setActiveConductor(NONE_ID), whose attach effect
+		// detaches AGAIN. The second detach must not re-run freezeForDetach()/frozen.clear() and
+		// spring the re-protected tail back open (FIX 1 regression guarded by detach()'s idempotency).
+		s.detach();
+		s.detach();
+
+		expect(s.isFolded(s.get("m4:p0")!)).toBe(true); // still frozen after the double detach
+		expect(s.get("m4:p0")!.override).toBe("folded");
+		expect(s.get("m4:p0")!.by).toBe("you");
+		expect(s.liveTokens).toBe(liveFolded);
+		expect(s.isProtected(s.get("m4:p0")!)).toBe(true);
+	});
+
 	it("a later resetAll clears the freeze exemption (frozen folds return to auto)", () => {
 		const s = makeStore(Array.from({ length: 5 }, (_, i) => blk(i, "text", 5000)));
 		s.setProtect(0); // no tail so resetAll's refold doesn't immediately re-protect
@@ -482,6 +504,90 @@ describe("ADR 0011 — reconcileLocks releases standing holds for a just-known l
 		s.reconcileLocks();
 		expect(s.get("m0:p0")!.override).toBe(null); // agent unfold released
 		expect(s.get("m1:p0")!.override).toBe("pinned"); // human pin survives (different axis)
+	});
+});
+
+// ── Bug #1: remote locks arrive by IN-PLACE mutation; the snapshot must drive reactivity ──
+//
+// A remote conductor (RemoteRunner) attaches with `locks` UNDEFINED, then mutates that field
+// IN PLACE when `conductor/hello` lands — it is the SAME object `store.conductor` already
+// points at, so its `$state` reference never changes. The store therefore can't rely on
+// reading `this.conductor.locks` to drive reactive UI (a `$derived`/`$effect` that captured
+// `store.conductor` would never re-run): it mirrors the locks into a `$state` snapshot,
+// reassigned in `reconcileLocks()`, which IS a reference change Svelte tracks.
+//
+// These tests model the real remote shape (in-place mutation, NOT the reassignment the FIX-4
+// tests above use — reassignment masks the bug because it is itself a reference change) and
+// assert through `protectedFromIndex`, a genuine `$derived.by` that depends on the
+// `tail-size` lock. Pre-fix this derived memoized on the unchanged `store.conductor` reference
+// and stayed stale even after reconcile; post-fix the snapshot write makes it recompute.
+describe("ADR 0011 — Bug #1: in-place remote lock update propagates only via the snapshot", () => {
+	/** A remote-style conductor: locks start undefined and are mutated in place (like RemoteRunner). */
+	class InPlaceRemote implements Conductor {
+		readonly id = "remote-like";
+		readonly label = "Remote-like";
+		locks: readonly LockName[] | undefined = undefined; // NOT readonly here — mutated in place
+		conduct(_view: ConductorView): Command[] | null {
+			return [];
+		}
+	}
+
+	it("tail-size: in-place mutation alone is inert; reconcileLocks flips the reactive protectedFromIndex", () => {
+		const s = makeStore(Array.from({ length: 4 }, (_, i) => blk(i)));
+		s.setProtect(20_000); // the whole small session is the protected tail → protectedFromIndex 0
+		const c = new InPlaceRemote();
+		s.attach(c); // attaches collaboratively (locks undefined)
+		expect(s.protectedFromIndex).toBe(0); // collaborative: all protected
+		expect(s.isLocked("tail-size")).toBe(false);
+
+		// Locks arrive over the wire and are written IN PLACE on the attached runner (no reassign).
+		c.locks = Object.freeze(["tail-size"] as LockName[]);
+
+		// Without reconcileLocks the snapshot is still empty — the derived must NOT have moved.
+		// (This is the crux: reading the conductor's mutated field directly would lie; the host
+		// deliberately keeps the snapshot as the single reactive source until reconcile runs.)
+		expect(s.protectedFromIndex).toBe(0);
+		expect(s.isLocked("tail-size")).toBe(false);
+
+		// The hello handler calls reconcileLocks(), which syncs the snapshot.
+		s.reconcileLocks();
+		expect(s.protectedFromIndex).toBe(s.blocks.length); // tail handed to the conductor — reactive read updated
+		expect(s.isLocked("tail-size")).toBe(true);
+		expect(s.locks).toEqual(["tail-size"]); // public reactive accessor reflects the new set
+	});
+
+	it("human-steering: isLocked + the public locks accessor update after reconcile (in-place mutation)", () => {
+		const s = makeStore(Array.from({ length: 4 }, (_, i) => blk(i)));
+		s.setProtect(0);
+		const c = new InPlaceRemote();
+		s.attach(c);
+		expect(s.isLocked("human-steering")).toBe(false);
+		expect(s.lockingConductorLabel).toBeNull();
+
+		c.locks = Object.freeze(["human-steering"] as LockName[]); // in-place
+		s.reconcileLocks();
+
+		expect(s.isLocked("human-steering")).toBe(true);
+		expect(s.locks).toEqual(["human-steering"]);
+		expect(s.lockingConductorLabel).toBe("Remote-like"); // label resolves once locks are live
+		// And the gate now actually bites: a human fold is refused under the freshly-known lock.
+		s.fold("m0:p0");
+		expect(s.get("m0:p0")!.override).toBeNull();
+	});
+
+	it("detach clears the snapshot so isLocked/locks go collaborative again", () => {
+		const s = makeStore(Array.from({ length: 4 }, (_, i) => blk(i)));
+		s.setProtect(0);
+		const c = new InPlaceRemote();
+		s.attach(c);
+		c.locks = Object.freeze(["human-steering", "tail-size"] as LockName[]);
+		s.reconcileLocks();
+		expect(s.isLocked("human-steering")).toBe(true);
+
+		s.detach(); // kill switch unlocks everything
+		expect(s.isLocked("human-steering")).toBe(false);
+		expect(s.isLocked("tail-size")).toBe(false);
+		expect(s.locks).toEqual([]);
 	});
 });
 

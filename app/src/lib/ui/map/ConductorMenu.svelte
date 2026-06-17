@@ -68,8 +68,17 @@
 	}
 	function cancelConsent(): void {
 		if (pendingConsent?.isRemote) {
-			// Remote post-handshake cancel: detach (kill switch — freezes + unlocks).
+			// Remote post-handshake cancel: detach (kill switch — freezes + unlocks) for an
+			// immediate, synchronous revert of the locked view.
 			store?.detach();
+			// Bug #2: detach() alone is NOT durable. The selection still points at the declined
+			// remote id, and the live RemoteRunner is still attached — so the auto-recovery path
+			// (a socket drop bumps conductorRetry.tick → the attach effect re-dials the SAME
+			// activeId) would silently re-attach and re-lock the conductor the user just declined.
+			// Reset the selection to Raw so the attach effect tears the runner down (attachConductor
+			// closes activeRemote on a NONE_ID switch) and never re-dials it. Mirrors handleStop /
+			// forget, which fall the active selection back when their conductor goes away.
+			setActiveConductor(NONE_ID);
 		}
 		pendingConsent = null; // revert: never attached (in-process) or detached (remote)
 	}
@@ -94,16 +103,22 @@
 
 	$effect(() => {
 		const cond = store?.conductor;
+		// Read the lock-set off the store's REACTIVE snapshot, NOT `cond.locks` (Bug #1): a remote
+		// runner mutates its `locks` field in place when `conductor/hello` lands, so `store.conductor`
+		// keeps the same object reference and `cond.locks` would never re-track. `store.locks` is the
+		// `$state` snapshot the store reassigns in reconcileLocks(), so this effect re-runs when a
+		// remote's locks finally arrive — which is the whole point of the post-handshake gate.
+		const locks = store?.locks ?? [];
 		// Guard: no conductor, dialog already open, or conductor is in-process → skip.
 		if (!cond || pendingConsent) return;
 		if (inProcessConductor(cond.id)) return;
-		if (!isExclusive(cond.locks)) return;
+		if (!isExclusive(locks)) return;
 		if (remoteConsentedIds.has(cond.id)) return;
 
 		// Remote exclusive conductor not yet consented — show the post-handshake gate.
 		// `isRemote: true` tells confirmConsent/cancelConsent to use the remote path:
 		// confirm → record as consented (already attached); cancel → store.detach().
-		pendingConsent = { id: cond.id, label: cond.label, locks: cond.locks ?? [], isRemote: true };
+		pendingConsent = { id: cond.id, label: cond.label, locks, isRemote: true };
 	});
 
 	let rootEl = $state<HTMLDivElement>();
@@ -158,8 +173,10 @@
 
 	// The ACTIVE conductor's live lock-set (source of truth once attached — covers remote
 	// conductors whose locks only arrive in the handshake). Drives the trigger's "locked"
-	// chrome and the "detach to regain control" hint.
-	const activeLocks = $derived<readonly LockName[]>(store?.conductor?.locks ?? []);
+	// chrome and the "detach to regain control" hint. Reads the store's REACTIVE snapshot
+	// (`store.locks`), not `store.conductor.locks`: a remote runner mutates its locks in place,
+	// so only the snapshot reassignment re-tracks (Bug #1).
+	const activeLocks = $derived<readonly LockName[]>(store?.locks ?? []);
 	const activeExclusive = $derived(isExclusive(activeLocks));
 
 	function toggle(): void {

@@ -122,22 +122,45 @@ export class AccordionStore {
 
 	// ---- involvement locks (ADR 0011) -------------------------------------
 	/**
-	 * The active conductor's declared lock-set (ADR 0011). Empty ⇒ collaborative — every
-	 * path below is byte-for-byte today's behavior, which is what keeps the golden test
-	 * (`conductor.builtin.test.ts`) untouched. A non-empty set ⇒ exclusive: the host gates
-	 * the named human/agent controls and (under `tail-size`) hands the conductor the tail.
-	 * Read off the conductor every access so an attach/detach immediately re-gates everything.
+	 * Reactive snapshot of the active conductor's declared lock-set (ADR 0011). Empty ⇒
+	 * collaborative — every path below is byte-for-byte today's behavior, which is what keeps
+	 * the golden test (`conductor.builtin.test.ts`) untouched. A non-empty set ⇒ exclusive: the
+	 * host gates the named human/agent controls and (under `tail-size`) hands the conductor the tail.
+	 *
+	 * Why a snapshot rather than reading `this.conductor?.locks` directly: an IN-PROCESS conductor
+	 * carries its locks at construction, so `attach()` (which REASSIGNS `this.conductor`, a `$state`
+	 * ref) makes any reactive reader re-run. A REMOTE conductor (`RemoteRunner`) attaches with
+	 * `locks` still undefined; the locks arrive later in `conductor/hello` and are mutated IN PLACE
+	 * on the same runner object — no `$state` reference changes, so a reader of `this.conductor`
+	 * would never re-evaluate (Bug #1: the remote consent dialog / locked chrome never appeared).
+	 * Mirroring the locks into this `$state` field, reassigned in BOTH `attach()` and
+	 * `reconcileLocks()`, gives the UI one reactive source of truth that updates whether the locks
+	 * arrive at attach (in-process) or late (remote). The engine's per-action gates read it too;
+	 * because it is set synchronously before each `refold()`, enforcement stays exact.
 	 */
-	private get activeLocks(): readonly LockName[] {
-		return this.conductor?.locks ?? [];
+	private activeLocks = $state<readonly LockName[]>([]);
+	/** Mirror the current conductor's declared locks into the reactive snapshot. Called from
+	 *  `attach()` (in-process locks known now) and `reconcileLocks()` (remote locks just arrived). */
+	private syncLocks(): void {
+		this.activeLocks = this.conductor?.locks ?? [];
 	}
 	/** Does the active conductor hold `name`? PUBLIC — the UI gates affordances/tooltips on it. */
 	isLocked(name: LockName): boolean {
-		return hasLock(this.conductor?.locks, name);
+		return hasLock(this.activeLocks, name);
 	}
 	/** Label of the conductor currently holding locks (for UI tooltips), or null if collaborative. */
 	get lockingConductorLabel(): string | null {
 		return this.activeLocks.length ? (this.conductor?.label ?? null) : null;
+	}
+	/**
+	 * The active conductor's effective lock-set, as a REACTIVE read for the UI (ADR 0011). Prefer
+	 * this over `store.conductor?.locks` in any reactive context: it tracks the `$state` snapshot,
+	 * so it updates even when a remote conductor's locks arrive late and mutate the runner in place
+	 * (Bug #1 — `store.conductor` keeps the same object reference, so reading `.locks` off it is
+	 * NOT tracked). Empty ⇒ collaborative. `isExclusive(store.locks)` is the exclusive test.
+	 */
+	get locks(): readonly LockName[] {
+		return this.activeLocks;
 	}
 	/** A HUMAN action is locked out iff it is the human's AND the conductor holds `human-steering`. */
 	private humanLocked(by: Actor): boolean {
@@ -162,12 +185,17 @@ export class AccordionStore {
 	 */
 	attach(c: Conductor | null): void {
 		this.conductor = c;
+		// Mirror the new conductor's locks into the reactive snapshot BEFORE any gate reads them
+		// (releaseLockedDomains → isLocked, the refold's protectedFromIndex → isLocked("tail-size")).
+		// For an in-process conductor these are the final locks; a remote runner attaches with locks
+		// undefined and updates the snapshot later via reconcileLocks().
+		this.syncLocks();
 		this.lastCmds = [];
 		// A fresh strategy owns the view now — drop any detach-freeze exemptions (those blocks
 		// are ordinary human folds again, subject to the new conductor's tail/healing rules).
 		this.frozen.clear();
-		// Release human/agent holds in the domains the NEW conductor locks (read off `c`, not
-		// the soon-to-change `activeLocks`). Order: set conductor first so `isLocked` reflects it.
+		// Release human/agent holds in the domains the NEW conductor locks. Pass `c?.locks`
+		// explicitly; the `activeLocks` snapshot was just synced above so `isLocked` already agrees.
 		this.releaseLockedDomains(c?.locks ?? []);
 		this.refold();
 	}
@@ -182,8 +210,17 @@ export class AccordionStore {
 	 * therefore persists, now human-owned, with all locks released.
 	 */
 	detach(): void {
+		// Idempotent: detaching an already conductor-less store is a no-op. A second pass would
+		// re-run freezeForDetach() → frozen.clear(), wiping the heal-exemptions the first detach
+		// set, springing the protected-tail folds back open (FIX 1 regression). cancelConsent
+		// deliberately calls detach() then setActiveConductor(NONE_ID), whose attach effect detaches
+		// again — this guard makes that second detach harmless.
+		if (this.conductor === null) return;
 		this.freezeForDetach();
 		this.conductor = null;
+		// Kill switch unlocks every control — clear the reactive lock snapshot to match the now-null
+		// conductor (otherwise stale locks would keep the gates closed and the UI showing "locked").
+		this.syncLocks();
 		this.lastCmds = [];
 		this.refold();
 	}
@@ -216,11 +253,20 @@ export class AccordionStore {
 	 * locked-domain release synchronously, but a remote conductor's `locks` are not known at
 	 * attach time — they arrive later in `conductor/hello`. The live layer calls this once the
 	 * hello lands so standing human/agent holds in the now-known locked domains are released to
-	 * the same clean baseline an in-process exclusive conductor authors from, then re-folds. The
-	 * release also bumps `version` (via `refold`), so reactive UI gating re-evaluates when a
-	 * remote greets. No-op for a collaborative (locks-nothing) conductor — same as attach.
+	 * the same clean baseline an in-process exclusive conductor authors from, then re-folds.
+	 *
+	 * Crucially it also updates the reactive `activeLocks` snapshot (via `syncLocks()`), which is
+	 * what actually propagates the just-arrived locks to the UI: the remote runner mutated its
+	 * `locks` field IN PLACE, so `store.conductor` still points at the same object and a reader of
+	 * `store.conductor.locks` is never re-tracked. Reassigning the `$state` snapshot is the
+	 * reference change Svelte needs — that, not the `version` bump in `refold()`, is what makes the
+	 * consent dialog and locked chrome appear for a remote exclusive conductor (Bug #1). No-op for a
+	 * collaborative (locks-nothing) conductor — same as attach.
 	 */
 	reconcileLocks(): void {
+		// Update the reactive snapshot first so the release below — and every subsequent gate —
+		// reads the freshly-declared locks.
+		this.syncLocks();
 		this.releaseLockedDomains(this.conductor?.locks ?? []);
 		this.refold();
 	}

@@ -146,6 +146,7 @@ describe("RemoteRunner — commands drive the store", () => {
 		const store = makeStore(3);
 		store.setProtect(0); // small fixture (3×1000 tok) is entirely inside the 20k tail — disable protection so a fold is allowed
 		const { ws } = connectRunner(store);
+		sendHello(ws, "full"); // complete the handshake — commands are ignored until greeted (Bug #3)
 		ws.emit({ type: "conductor/commands", rev: 1, commands: [{ kind: "fold", ids: ["m0:p0"] }] });
 
 		expect(store.isFolded(store.get("m0:p0")!)).toBe(true);
@@ -160,6 +161,7 @@ describe("RemoteRunner — commands drive the store", () => {
 		const store = makeStore(3);
 		store.setProtect(0); // see above — disable protection so the tiny fixture's blocks are foldable
 		const { ws } = connectRunner(store);
+		sendHello(ws, "full"); // complete the handshake — commands are ignored until greeted (Bug #3)
 		ws.emit({
 			type: "conductor/commands",
 			rev: 2,
@@ -174,10 +176,30 @@ describe("RemoteRunner — commands drive the store", () => {
 		expect(result.reports.some((r: any) => r.reason === "unknown-id")).toBe(true);
 	});
 
+	it("IGNORES conductor/commands that arrive before conductor/hello (greeted gate, Bug #3)", () => {
+		const store = makeStore(3);
+		store.setProtect(0);
+		const { ws } = connectRunner(store); // socket open, host/hello sent — but NO conductor/hello yet
+		const resultsBefore = ws.framesOfType("host/commandResult").length;
+
+		// A conductor that skips the handshake and sends commands straight away bypasses the
+		// protocol-version check (which lives only in the hello case). The runner must drop these.
+		ws.emit({ type: "conductor/commands", rev: 1, commands: [{ kind: "fold", ids: ["m0:p0"] }] });
+
+		expect(store.isFolded(store.get("m0:p0")!)).toBe(false); // command ignored — nothing folded
+		expect(ws.framesOfType("host/commandResult").length).toBe(resultsBefore); // no result echoed
+
+		// After the handshake completes, the same command applies normally.
+		sendHello(ws, "full");
+		ws.emit({ type: "conductor/commands", rev: 1, commands: [{ kind: "fold", ids: ["m0:p0"] }] });
+		expect(store.isFolded(store.get("m0:p0")!)).toBe(true);
+	});
+
 	it("holds the last command set when the conductor goes silent", () => {
 		const store = makeStore(3);
 		store.setProtect(0); // see above — disable protection so the tiny fixture's blocks are foldable
 		const { ws } = connectRunner(store);
+		sendHello(ws, "full"); // complete the handshake — commands are ignored until greeted (Bug #3)
 		ws.emit({ type: "conductor/commands", commands: [{ kind: "fold", ids: ["m0:p0"] }] });
 		expect(store.isFolded(store.get("m0:p0")!)).toBe(true);
 

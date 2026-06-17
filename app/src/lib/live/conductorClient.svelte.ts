@@ -237,6 +237,12 @@ export class RemoteRunner implements Conductor {
 				this.store.reconcileLocks();
 				break;
 			case "conductor/commands": {
+				// Bug #3: a conductor MUST complete the handshake before it can steer. Protocol-
+				// version validation (and the lock declaration) live ONLY in the `conductor/hello`
+				// case, so commands arriving before/without a hello would bypass that gate entirely —
+				// a version-mismatched or never-greeted conductor could fold the live context. Ignore
+				// any commands until greeted; a well-behaved conductor always sends hello first.
+				if (!this.greeted) break;
 				// Drop replies to stale snapshots. If the conductor echoed a rev that is
 				// older than the latest context/update we have sent, this reply was computed
 				// against a state we already superseded — applying it would rewind decisions.
