@@ -88,10 +88,11 @@ export interface FoldOp {
  *
  * Provider safety lives on BOTH sides (defense in depth, like `FoldOp`): the extension's
  * `applyPlan` re-derives tool-pair balance independently and only removes WHOLE, balanced,
- * durable, non-backstop messages — on ANY doubt the affected messages pass through
- * untouched. Safe because `applyPlan`'s output feeds the model only; the GUI's block sync
- * and `sentCount` cursor run off the un-collapsed `linearize`, so a removal can never desync
- * the view.
+ * durable messages — on ANY doubt the affected messages pass through untouched. The wire
+ * trusts the engine's plan (the engine is the single foldability gate and never folds a
+ * protected block), so no separate wire-side position backstop is applied. Safe because
+ * `applyPlan`'s output feeds the model only; the GUI's block sync and `sentCount` cursor
+ * run off the un-collapsed `linearize`, so a removal can never desync the view.
  */
 export interface GroupOp {
 	id: string;

@@ -156,8 +156,8 @@ await new Promise((resolve, reject) => {
 			seen.contextSync = true;
 			seen.contextBlocks = m.blocks.length;
 			// Use durable id (a:<responseId>:p0) — exercises the Phase-1 id path
-			// Also send a GROUP op (ADR 0006) collapsing m0 (user, durable u:<T0>, outside the
-			// 2-message backstop) into one summary entry — exercises range-collapse end to end.
+			// Also send a GROUP op (ADR 0006) collapsing m0 (user, durable u:<T0>) into one
+			// summary entry — exercises range-collapse end to end.
 			ws.send(
 				JSON.stringify({
 					type: "plan",
@@ -708,8 +708,9 @@ else {
 //
 // Determinism: positional ids are pure functions of array index, and we drive the
 // `context` hook directly with a fixed array, so the ids below are exact. The
-// anchor-less assistant sits at index 0 (→ m0:p0), well outside the protected tail
-// (PROTECT_RECENT_MSGS=2, padded by two trailing anchored messages).
+// anchor-less assistant sits at index 0 (→ m0:p0). The durable-id guard refuses
+// any fold op for it regardless of its position (no responseId/timestamp → no
+// durable anchor → positional id → guard drops the op).
 const posTarget = { role: "assistant", content: [{ type: "text", text: "ANCHORLESS ORIGINAL" }] }; // NO responseId / timestamp
 const posMsgs = [
 	posTarget, // index 0 → positional id m0:p0
@@ -912,8 +913,8 @@ if (!contextReturn || !contextReturn.messages) fails.push("context hook did not 
 else {
 	const foldedText = contextReturn.messages[1]?.content?.[0]?.text;
 	if (foldedText !== "FOLDED") fails.push(`a:resp-abc:p0 not folded — got ${JSON.stringify(foldedText)}`);
-	const protectedText = contextReturn.messages[3]?.content?.[0]?.text;
-	if (protectedText !== "second reply") fails.push("recent message was unexpectedly altered");
+	const untargetedText = contextReturn.messages[3]?.content?.[0]?.text;
+	if (untargetedText !== "second reply") fails.push("untargeted message (resp-def, no op in plan) was unexpectedly altered — structural passthrough broken");
 	// Group collapse (ADR 0006): m0 (user "do the thing") was replaced by the one summary
 	// entry; the array stays length 4 (one removed, one inserted) so the indices above hold.
 	const groupText = contextReturn.messages[0]?.content?.[0]?.text;
@@ -941,7 +942,7 @@ if (fails.length) {
 }
 console.log(
 	`SMOKE PASS — registry(port ${PORT}, model ✓, tokens ✓) ✓  no-GUI passthrough ✓  focus request ✓  ` +
-		`hello ✓  attach-flush(${seen.flushBlocks} blocks on connect) ✓  plan applied per-block ✓  group collapse ✓  backstop ✓  ` +
+		`hello ✓  attach-flush(${seen.flushBlocks} blocks on connect) ✓  plan applied per-block ✓  group collapse ✓  structural-passthrough ✓  ` +
 		`message_end committed-streaming ✓  model-swap window-push ✓  tool-loop (2 msgs/turn) ✓  no-dup after context ✓  ` +
 		`empty-leading-part dedup ✓  agent_end live-view ✓  shutdown cleanup ✓  ` +
 		`stream(start/end/abort) ✓  no-content-on-frame ✓  delta-dropped ✓  ` +

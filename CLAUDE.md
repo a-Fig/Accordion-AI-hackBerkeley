@@ -81,7 +81,7 @@ plan the app returns. Decisions live in ADRs: [0001](docs/adr/0001-pi-live-integ
     `PROTOCOL_VERSION`. Block ids encode message location (`m<i>:p<j>`, `m<i>:r`, …).
   - `mapping.ts` — `linearize(messages)` (mirrors `engine/parse`) and the **pure,
     kind-checked** `applyPlan(messages, ops)` (a `tool_call` is never folded → never
-    orphans its result; recent messages are backstopped).
+    orphans its result; the engine is the single foldability gate so no wire-side position backstop is needed — the engine never folds a protected block).
   - `registry.ts` — the **discovery** contract: `SessionEntry`, `FocusRequest`,
     `isLiveEntry`, and the `~/.accordion/` layout. The Tauri Rust layer mirrors these
     constants — change them in lockstep.

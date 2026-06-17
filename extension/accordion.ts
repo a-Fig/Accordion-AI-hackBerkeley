@@ -20,7 +20,8 @@
  *     UNMODIFIED. We never corrupt context.
  *   • pi's native /compact is suppressed ONLY while the GUI is attached.
  *   • The shared mapping (linearize/applyPlan) carries the provider-safety rules
- *     and a coarse "never fold the newest messages" backstop.
+ *     (durable-id + kind checks); the engine is the single foldability gate and
+ *     never folds a protected block, so no wire-side position backstop is needed.
  *
  * Milestone 1: the GUI replies with an empty plan, so this never alters a model
  * call — it only proves the loop and powers the live view.

@@ -54,9 +54,9 @@ export function computeFoldOps(store: AccordionStore): FoldOp[] {
 /**
  * Compute the group-collapse ops for the current store state (ADR 0006): one `GroupOp` per
  * FOLDED group. `memberIds` is the group's durable member ids — the GUI's *intent*; the
- * extension's `applyPlan` independently re-derives which whole, balanced, non-backstop
- * messages it may actually remove (a non-durable member is dropped here too, since a
- * positional id is not stable across array shifts). `summaryText` is the engine's
+ * extension's `applyPlan` independently re-derives which whole, balanced messages it may
+ * actually remove (a non-durable member is dropped here too, since a positional id is not
+ * stable across array shifts). `summaryText` is the engine's
  * single-source-of-truth recap, carrying the one `{#code FOLDED}` tag for the whole range.
  * Pure read; the store is never mutated.
  */

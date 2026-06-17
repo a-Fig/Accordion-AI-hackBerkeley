@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { AccordionStore } from "../engine/store.svelte";
 import type { Block, BlockKind, ParsedSession } from "../engine/types";
 import type { Conductor, ConductorView, Command, LockName } from "$conductors/contract";
-import { computeFoldOps, resolveUnfold, resolveRecall } from "./plan";
-import { isDurableId } from "./mapping";
+import { computeFoldOps, computeGroupOps, resolveUnfold, resolveRecall } from "./plan";
+import { isDurableId, applyPlan, type PiMessage } from "./mapping";
 import { foldCode } from "../engine/digest";
 
 /** A test conductor that folds a configurable command batch and declares a lock-set. */
@@ -470,6 +470,122 @@ describe("resolveRecall", () => {
 
 		// READ-ONLY: the group is STILL folded
 		expect(s.groupById(g!.id)!.folded).toBe(true);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regression guard — the PR #46 divergence (view↔wire mismatch when conductor
+// holds a tail-size lock with tailTokens=0).
+//
+// With tailTokens=0 the engine's protectedFromIndex equals blocks.length, so
+// the engine legitimately auto-folds ALL blocks including the newest ones. The
+// old PROTECT_RECENT_MSGS=2 backstop in applyPlan would then suppress those ops
+// on the wire — the GUI shows the block folded but the agent receives it whole.
+// This test reproduces that scenario and proves the divergence is CLOSED after
+// removing the backstop.
+//
+// Covers BOTH individual FoldOps and GroupOps.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("regression: view↔wire divergence with tailTokens=0 (PR #46)", () => {
+	// Build a pair of matching PiMessages + engine Blocks that share durable ids.
+	// The newest ASSISTANT message carries a text part — the one that was
+	// suppressed by the old backstop when it sat in the last 2 messages.
+	const NEWEST_TEXT = "NEWEST ASSISTANT REPLY " + "content ".repeat(200);
+	const OLDER_TEXT = "OLDER ASSISTANT REPLY " + "content ".repeat(200);
+
+	function makeSession() {
+		order = 0;
+		// 3 blocks: an older text block + a newest text block + a user block (untargetable)
+		const blocks: Block[] = [
+			blk({ id: "a:resp_old:p0", kind: "text", tokens: 8000, text: OLDER_TEXT }),
+			blk({ id: "a:resp_new:p0", kind: "text", tokens: 8000, text: NEWEST_TEXT }),
+			blk({ id: "u:1000", kind: "user", tokens: 50, text: "hi" }),
+		];
+		// tailTokens=0 ⟹ protectedFromIndex = blocks.length (all blocks foldable by engine).
+		// Budget << liveTokens ⟹ engine auto-folds everything it can.
+		const s = makeStore(blocks);
+		s.setProtect(0);
+		s.setBudget(1000);
+		// Sanity: the newest text block IS folded by the engine.
+		expect(s.isFolded(s.get("a:resp_new:p0")!)).toBe(true);
+		expect(s.isFolded(s.get("a:resp_old:p0")!)).toBe(true);
+		return s;
+	}
+
+	// Corresponding pi messages (same durable ids, same content).
+	const piMessages: PiMessage[] = [
+		{
+			role: "assistant",
+			responseId: "resp_old",
+			timestamp: 100,
+			content: [{ type: "text", text: OLDER_TEXT }],
+		},
+		{
+			role: "assistant",
+			responseId: "resp_new",
+			timestamp: 200,
+			content: [{ type: "text", text: NEWEST_TEXT }],
+		},
+		{ role: "user", content: "hi", timestamp: 1000 },
+	];
+
+	it("individual FoldOps: applyPlan FOLDS the newest message when the engine folded it (no position backstop)", () => {
+		const s = makeSession();
+		const ops = computeFoldOps(s);
+
+		// computeFoldOps must emit ops for BOTH old and newest text blocks.
+		const opIds = ops.map((o) => o.id);
+		expect(opIds).toContain("a:resp_old:p0");
+		expect(opIds).toContain("a:resp_new:p0"); // the key one — newest block in the plan
+
+		// The regression: before the fix applyPlan would NOT fold the newest message
+		// (it was in the last 2 messages → PROTECT_RECENT_MSGS backstop suppressed it).
+		// After the fix it MUST fold it.
+		const out = applyPlan(piMessages, ops);
+		expect(out).not.toBe(piMessages); // something changed
+
+		// Newest block is folded on the wire — no divergence.
+		const newestPart = (out[1].content as any[])[0];
+		expect(newestPart.text).not.toBe(NEWEST_TEXT); // not the original
+		expect(newestPart.text).toBe(s.digestOf(s.get("a:resp_new:p0")!)); // matches the view's digest
+
+		// Older block folded too.
+		const olderPart = (out[0].content as any[])[0];
+		expect(olderPart.text).toBe(s.digestOf(s.get("a:resp_old:p0")!));
+
+		// User message never folded (structural guard still holds).
+		expect(out[2].content).toBe("hi");
+	});
+
+	it("GroupOps: applyPlan COLLAPSES a group spanning the newest messages (no position backstop)", () => {
+		order = 0;
+		// A group of both text blocks (both durable, both foldable). The conductor has
+		// grouped them; computeGroupOps emits one GroupOp covering them.
+		const blocks: Block[] = [
+			blk({ id: "a:resp_old:p0", kind: "text", tokens: 8000, text: OLDER_TEXT }),
+			blk({ id: "a:resp_new:p0", kind: "text", tokens: 8000, text: NEWEST_TEXT }),
+			blk({ id: "u:1000", kind: "user", tokens: 50, text: "hi" }),
+		];
+		const s = makeStore(blocks);
+		s.setProtect(0);
+		// Create a group spanning both text blocks.
+		const g = s.createGroup("a:resp_old:p0", "a:resp_new:p0");
+		expect(g).not.toBeNull();
+		// Groups are folded by default on creation.
+		expect(g!.folded).toBe(true);
+
+		const groupOps = computeGroupOps(s);
+		expect(groupOps.length).toBeGreaterThan(0);
+		expect(groupOps[0].memberIds).toContain("a:resp_new:p0"); // newest block is in the group op
+
+		const out = applyPlan(piMessages, [], groupOps);
+		// The 2 messages (index 0+1) collapse into one summary; user remains.
+		// Before the fix the newest message (index 1 in a 3-msg array = last 2) was backstopped.
+		expect(out.length).toBe(2); // 2 messages collapsed to 1 + user = 2
+		const summaryMsg = out[0];
+		expect((summaryMsg.content as any[])[0].text).toBe(groupOps[0].summaryText);
+		// User message unchanged.
+		expect(out[1].content).toBe("hi");
 	});
 });
 
