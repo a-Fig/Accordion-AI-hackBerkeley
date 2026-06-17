@@ -189,8 +189,9 @@ did NOT lock."** Concretely:
 
 ### 9. Additivity — nothing changes until you opt in
 
-The default is **collaborative**. All four shipping conductors — `builtin`, `cold-score`,
-`attention-folder`, `recency-folder` — declare **no locks** and keep today's behavior. The
+The default is **collaborative**. Every conductor that ships in `conductors/` today — the
+built-in, `cold-score`, `cold-epoch`, `sliding-window`, `attention-folder`, and
+`recency-folder` — declares **no locks** and keeps today's behavior. The
 built-in's `conduct()` is **byte-identical**, so the golden test
 (`conductor.builtin.test.ts`) is **untouched**. That untouched golden is the proof this ships
 **additively**: a user who never picks a locking conductor never sees a single behavioral
@@ -259,7 +260,7 @@ This ADR is the **spec**; the code is the next step. Confirmed scope:
   capability matrix; "overrule it with a pin"), README ("Three hands on the same controls"),
   and CLAUDE.md ("human overrides always win") are rewritten to make the conditionality
   first-class, not a footnote.
-- **Ships additively.** The golden test is untouched; the four existing conductors are
+- **Ships additively.** The golden test is untouched; every existing conductor is
   unchanged; a user who never opts in never notices.
 
 ## Rejected alternatives

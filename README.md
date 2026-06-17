@@ -29,13 +29,15 @@ Accordion shows the agent's context as a list of **sections** — one per turn �
 
 Nothing is ever deleted — folding only changes what the agent is *shown*, never what's *stored* — so every fold is instantly reversible, with no database or search index behind it.
 
-And the recent past is always safe: the most recent ~20k tokens of context are protected, so the agent's working tail — its latest reasoning — stays at full fidelity. That tail is an absolute no-fold zone: automatic folding, manual folding, and group creation all stop before it.
+And the recent past is always safe: the most recent ~20k tokens of context are protected, so the agent's working tail — its latest reasoning — stays at full fidelity. That tail is an absolute no-fold zone under a collaborative conductor (the default); an exclusive conductor you approve can manage it.
 
 ## Three hands on the same controls
 
 - **You** — fold, unfold, pin, and peek, by hand.
-- **The agent** — reaches back to unfold or pin context it needs mid-task.
+- **The agent** — reaches back to unfold or pin context it needs mid-task, or **recall** a folded block as a tool result (like `read_file`) without changing what's standing in context.
 - **The Conductor** — Accordion's automatic mode: between every turn it folds what's gone cold and unfolds what's becoming relevant, on its own.
+
+A Conductor is **collaborative** by default (you steer alongside it — your overrides always win) or **exclusive** (autopilot: you approve it taking over specific controls, and steer via the **detach** kill switch). Either way, observation is always yours — you can always see, and you can always leave.
 
 And folds nest: cold turns fold into **groups**, groups into bigger groups, so a session of thousands of turns stays small enough to fit and complete enough to recover. It all happens in a **separate window** where every change is shown and attributed — open it to watch and steer, close it to let the Conductor run.
 
@@ -80,7 +82,7 @@ Drag any session `.jsonl` onto the window, or use the bundled sample. Everything
   `{#code FOLDED}` handles the live agent can ask to unfold.
 
 Honest about what's **not** there yet: there is no autonomous Conductor on a live session,
-no agent-driven pinning, no nested/hierarchical groups, no LLM-generated summaries, no
+no agent-driven pinning, no involvement locks, no nested/hierarchical groups, no LLM-generated summaries, no
 replay — that's the build ahead. There's also an
 older terminal-only POC (`src/accordion.ts`, `/expand` · `/collapse` · `/accordion`) that
 predates the app.
@@ -118,6 +120,7 @@ setup, and platform gotchas) is in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 - [ ] The Conductor — automatic fold/unfold between turns, based on context
 - [ ] Hierarchical folding — fold the folds, for million-turn sessions
 - [ ] Agent-driven unfold and pin
+- [ ] Involvement locks — exclusive conductors, the detach kill switch, and agent recall
 - [ ] Replay — scrub how the context evolved across a session
 
 ---
