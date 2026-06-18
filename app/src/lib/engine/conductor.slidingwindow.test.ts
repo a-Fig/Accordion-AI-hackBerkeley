@@ -1,5 +1,5 @@
 /*
- * conductor.dropoldest.test.ts — behavioural tests for DropOldestConductor.
+ * conductor.slidingwindow.test.ts — behavioural tests for SlidingWindowConductor.
  *
  * Driven directly against `conduct()` using synthetic `ConductorView` fixtures,
  * mirroring the pattern in conductor.autopilot.test.ts.
@@ -16,7 +16,7 @@
  *      the agent-visible window refills past 90%; the drop-set is monotonic.
  */
 import { describe, it, expect } from "vitest";
-import { DropOldestConductor } from "$conductors/drop-oldest/drop-oldest";
+import { SlidingWindowConductor } from "$conductors/sliding-window/sliding-window";
 import { IN_PROCESS_CONDUCTORS } from "$conductors";
 import type { ConductorView, ViewBlock } from "$conductors/contract";
 
@@ -64,7 +64,7 @@ function makeView(
 
 // ── 1. Under 90% → raw ───────────────────────────────────────────────────────
 
-describe("DropOldestConductor — under budget returns raw", () => {
+describe("SlidingWindowConductor — under budget returns raw", () => {
 	it("returns [] when liveTokens ≤ budget * 0.90", () => {
 		const blocks = [
 			vb("m0:p0", "text", 0, 1000),
@@ -72,26 +72,26 @@ describe("DropOldestConductor — under budget returns raw", () => {
 			vb("m2:p0", "text", 2, 1000),
 		];
 		const view = makeView(blocks, 10_000, 8_999); // 8999 < 9000 = 90%
-		expect(new DropOldestConductor().conduct(view)).toEqual([]);
+		expect(new SlidingWindowConductor().conduct(view)).toEqual([]);
 	});
 
 	it("returns [] when liveTokens equals exactly 90% of budget", () => {
 		const blocks = [vb("m0:p0", "text", 0, 9_000)];
 		const view = makeView(blocks, 10_000, 9_000); // exactly 90%
-		expect(new DropOldestConductor().conduct(view)).toEqual([]);
+		expect(new SlidingWindowConductor().conduct(view)).toEqual([]);
 	});
 });
 
 // ── 2. Over 90% → emit group commands with digest: null ──────────────────────
 
-describe("DropOldestConductor — emits drop groups above trigger", () => {
+describe("SlidingWindowConductor — emits drop groups above trigger", () => {
 	it("emits one group command covering the oldest non-user blocks", () => {
 		// 10 text blocks × 1000 tokens = 10k live; budget = 10k → 100% → over trigger.
 		// removeTarget = 10000 - 7000 = 3000, so we need 3 blocks.
 		const blocks = Array.from({ length: 10 }, (_, i) => vb(`m${i}:p0`, "text", i, 1_000));
 		const view = makeView(blocks, 10_000, 10_000);
 
-		const result = new DropOldestConductor().conduct(view);
+		const result = new SlidingWindowConductor().conduct(view);
 
 		expect(result.length).toBeGreaterThan(0);
 		const cmd = result[0] as { kind: string; ids: string[]; digest: null };
@@ -107,7 +107,7 @@ describe("DropOldestConductor — emits drop groups above trigger", () => {
 		const blocks = Array.from({ length: 10 }, (_, i) => vb(`m${i}:p0`, "text", i, 1_000));
 		const view = makeView(blocks, 10_000, 10_000);
 
-		const [cmd] = new DropOldestConductor().conduct(view) as Array<{
+		const [cmd] = new SlidingWindowConductor().conduct(view) as Array<{
 			kind: string;
 			ids: string[];
 			digest: null;
@@ -121,7 +121,7 @@ describe("DropOldestConductor — emits drop groups above trigger", () => {
 
 // ── 3. User blocks split runs ─────────────────────────────────────────────────
 
-describe("DropOldestConductor — user blocks split runs", () => {
+describe("SlidingWindowConductor — user blocks split runs", () => {
 	it("user blocks are NOT included in any group command", () => {
 		const blocks = [
 			vb("m0:p0", "text", 0, 2_000),   // eligible non-user
@@ -132,7 +132,7 @@ describe("DropOldestConductor — user blocks split runs", () => {
 		// budget = 5000, liveTokens = 6500 → 130% > trigger. removeTarget = 6500 - 3500 = 3000.
 		const view = makeView(blocks, 5_000, 6_500);
 
-		const result = new DropOldestConductor().conduct(view);
+		const result = new SlidingWindowConductor().conduct(view);
 
 		const allIds = result.flatMap((c) => (c as { ids: string[] }).ids);
 		expect(allIds).not.toContain("m1:p0");
@@ -150,7 +150,7 @@ describe("DropOldestConductor — user blocks split runs", () => {
 		];
 		const view = makeView(blocks, 10_000, 10_000);
 
-		const result = new DropOldestConductor().conduct(view);
+		const result = new SlidingWindowConductor().conduct(view);
 
 		// Only the first run is needed (3000 ≥ removeTarget of 3000).
 		expect(result).toHaveLength(1);
@@ -172,7 +172,7 @@ describe("DropOldestConductor — user blocks split runs", () => {
 		];
 		const view = makeView(blocks, 2_000, 2_100);
 
-		const result = new DropOldestConductor().conduct(view);
+		const result = new SlidingWindowConductor().conduct(view);
 
 		expect(result.length).toBeGreaterThanOrEqual(2);
 		const ids0 = (result[0] as { ids: string[] }).ids;
@@ -184,14 +184,14 @@ describe("DropOldestConductor — user blocks split runs", () => {
 
 // ── 4. Stops near the 70% target ─────────────────────────────────────────────
 
-describe("DropOldestConductor — stops at the remove target", () => {
+describe("SlidingWindowConductor — stops at the remove target", () => {
 	it("does not accumulate more blocks than needed to reach TARGET", () => {
 		// 10 blocks × 1000 tokens, budget = 10_000, live = 10_000.
 		// removeTarget = 3_000; should stop after 3 blocks (m0..m2), not consume all 10.
 		const blocks = Array.from({ length: 10 }, (_, i) => vb(`m${i}:p0`, "text", i, 1_000));
 		const view = makeView(blocks, 10_000, 10_000);
 
-		const [cmd] = new DropOldestConductor().conduct(view) as Array<{ ids: string[] }>;
+		const [cmd] = new SlidingWindowConductor().conduct(view) as Array<{ ids: string[] }>;
 
 		expect(cmd.ids[1]).toBe("m2:p0");
 	});
@@ -199,7 +199,7 @@ describe("DropOldestConductor — stops at the remove target", () => {
 
 // ── 5. 1-member group (single non-user block between two user blocks) ─────────
 
-describe("DropOldestConductor — 1-member group for isolated non-user block", () => {
+describe("SlidingWindowConductor — 1-member group for isolated non-user block", () => {
 	it("emits ids[0] === ids[1] for a lone non-user block flanked by user blocks", () => {
 		// user | text(5000) | user
 		// budget = 5000, live = 5001 → removeTarget = 5001 - 3500 = 1501.
@@ -211,7 +211,7 @@ describe("DropOldestConductor — 1-member group for isolated non-user block", (
 		];
 		const view = makeView(blocks, 5_000, 5_001);
 
-		const result = new DropOldestConductor().conduct(view);
+		const result = new SlidingWindowConductor().conduct(view);
 
 		expect(result).toHaveLength(1);
 		const cmd = result[0] as { kind: string; ids: string[]; digest: null };
@@ -224,22 +224,22 @@ describe("DropOldestConductor — 1-member group for isolated non-user block", (
 
 // ── 6. Empty / zero-budget guards ─────────────────────────────────────────────
 
-describe("DropOldestConductor — empty/zero-budget guards", () => {
+describe("SlidingWindowConductor — empty/zero-budget guards", () => {
 	it("returns [] for empty block list", () => {
 		const view = makeView([], 10_000, 0);
-		expect(new DropOldestConductor().conduct(view)).toEqual([]);
+		expect(new SlidingWindowConductor().conduct(view)).toEqual([]);
 	});
 
 	it("returns [] when budget is zero", () => {
 		const blocks = [vb("m0:p0", "text", 0, 5_000)];
 		const view = makeView(blocks, 0, 5_000);
-		expect(new DropOldestConductor().conduct(view)).toEqual([]);
+		expect(new SlidingWindowConductor().conduct(view)).toEqual([]);
 	});
 
 	it("returns [] when protectedFromIndex = 0 (entire context is protected tail)", () => {
 		const blocks = [vb("m0:p0", "text", 0, 5_000)];
 		const view = makeView(blocks, 5_000, 9_000, 0); // all protected
-		expect(new DropOldestConductor().conduct(view)).toEqual([]);
+		expect(new SlidingWindowConductor().conduct(view)).toEqual([]);
 	});
 });
 
@@ -247,11 +247,11 @@ describe("DropOldestConductor — empty/zero-budget guards", () => {
 
 // ── 8. Hysteresis band (high-water 90% / low-water 70%) ──────────────────────
 
-describe("DropOldestConductor — hysteresis: holds between 70% and 90%", () => {
+describe("SlidingWindowConductor — hysteresis: holds between 70% and 90%", () => {
 	it("does NOT re-drop on a second pass once the visible window is below the trigger", () => {
 		// 10 × 1000 = 10k raw, budget 10k. First pass drops to ~70% (m0..m2).
 		const blocks = Array.from({ length: 10 }, (_, i) => vb(`m${i}:p0`, "text", i, 1_000));
-		const c = new DropOldestConductor();
+		const c = new SlidingWindowConductor();
 
 		// Pass 1: raw 10k > 90% → drop m0..m2.
 		const first = c.conduct(makeView(blocks, 10_000, 10_000));
@@ -266,7 +266,7 @@ describe("DropOldestConductor — hysteresis: holds between 70% and 90%", () => 
 	});
 
 	it("re-drops only after the visible window refills past 90% (new turns appended)", () => {
-		const c = new DropOldestConductor();
+		const c = new SlidingWindowConductor();
 
 		// Pass 1: 10 × 1000 = 10k, budget 10k → drop m0..m2 (visible → 7k).
 		const v1 = Array.from({ length: 10 }, (_, i) => vb(`m${i}:p0`, "text", i, 1_000));
@@ -289,7 +289,7 @@ describe("DropOldestConductor — hysteresis: holds between 70% and 90%", () => 
 	});
 
 	it("holds at the band — visible between 70% and 90% adds nothing", () => {
-		const c = new DropOldestConductor();
+		const c = new SlidingWindowConductor();
 		const v1 = Array.from({ length: 10 }, (_, i) => vb(`m${i}:p0`, "text", i, 1_000));
 		c.conduct(makeView(v1, 10_000, 10_000)); // drop m0..m2 → visible 7k
 
@@ -301,7 +301,7 @@ describe("DropOldestConductor — hysteresis: holds between 70% and 90%", () => 
 	});
 
 	it("is monotonic — never restores a deleted block, even far below budget", () => {
-		const c = new DropOldestConductor();
+		const c = new SlidingWindowConductor();
 		const blocks = Array.from({ length: 10 }, (_, i) => vb(`m${i}:p0`, "text", i, 1_000));
 		c.conduct(makeView(blocks, 10_000, 10_000)); // drop m0..m2
 
@@ -311,7 +311,7 @@ describe("DropOldestConductor — hysteresis: holds between 70% and 90%", () => 
 	});
 
 	it("clears the committed drop-set when the budget drops to zero", () => {
-		const c = new DropOldestConductor();
+		const c = new SlidingWindowConductor();
 		const blocks = Array.from({ length: 10 }, (_, i) => vb(`m${i}:p0`, "text", i, 1_000));
 		c.conduct(makeView(blocks, 10_000, 10_000)); // drop m0..m2
 		expect(c.conduct(makeView(blocks, 0, 10_000))).toEqual([]); // zero budget → forget + raw
@@ -320,23 +320,23 @@ describe("DropOldestConductor — hysteresis: holds between 70% and 90%", () => 
 	});
 });
 
-describe("DropOldestConductor — lock declaration", () => {
+describe("SlidingWindowConductor — lock declaration", () => {
 	it("locks human-steering and agent-unfold but NOT tail-size", () => {
-		const c = new DropOldestConductor();
+		const c = new SlidingWindowConductor();
 		expect(c.locks).toEqual(["human-steering", "agent-unfold"]);
 		expect(c.locks).not.toContain("tail-size");
 	});
 
 	it("id and label are stable", () => {
-		const c = new DropOldestConductor();
-		expect(c.id).toBe("drop-oldest");
+		const c = new SlidingWindowConductor();
+		expect(c.id).toBe("sliding-window");
 		expect(c.label).toBe("Sliding window");
 	});
 
 	it("registry entry locks deep-equal instance locks (drift guard)", () => {
-		const entry = IN_PROCESS_CONDUCTORS.find((c) => c.id === "drop-oldest");
+		const entry = IN_PROCESS_CONDUCTORS.find((c) => c.id === "sliding-window");
 		expect(entry).toBeDefined();
-		const instance = new DropOldestConductor();
+		const instance = new SlidingWindowConductor();
 		expect(entry!.locks).toEqual([...instance.locks]);
 	});
 });

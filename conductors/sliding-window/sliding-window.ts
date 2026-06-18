@@ -1,5 +1,5 @@
 /*
- * drop-oldest.ts — delete the oldest non-user blocks to keep the live window under budget.
+ * sliding-window.ts — delete the oldest non-user blocks to keep the live window under budget.
  *
  * Strategy (high-water / low-water hysteresis band):
  *  - Trigger (high-water): the AGENT-VISIBLE live window climbs above budget * 0.90.
@@ -42,8 +42,8 @@ const TRIGGER = 0.9;
 /** Fraction of budget the visible window is brought back down to (low-water mark). */
 const TARGET = 0.7;
 
-export class DropOldestConductor implements Conductor {
-	readonly id = "drop-oldest";
+export class SlidingWindowConductor implements Conductor {
+	readonly id = "sliding-window";
 	readonly label = "Sliding window";
 
 	/**

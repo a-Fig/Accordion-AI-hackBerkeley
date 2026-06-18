@@ -282,9 +282,9 @@ literal `""`/whitespace string as a malformed op (passing those messages through
 That rejection is pure defense-in-depth for a hand-crafted op — it is unreachable through the
 engine, which always sends `null` for a drop.
 
-### Introduces: `drop-oldest` conductor
+### Introduces: `sliding-window` conductor
 
-`conductors/drop-oldest/` replaces `conductors/sliding-window/`. It issues `group` commands
+`conductors/sliding-window/` ships this hard-delete capability. It issues `group` commands
 with `digest: null` to remove the oldest non-`user` blocks (skipping user messages, which stay
 live). It locks `human-steering` + `agent-unfold` (NOT `tail-size`) so that, while attached,
 neither a human override nor an agent `unfold` can re-admit content it dropped — recovery is
@@ -302,7 +302,7 @@ to ~70%, then **holds** — re-emitting the same `group(digest:null)` commands s
 stay applied while the window refills toward 90% again. The set is monotonic (a dropped block
 is gone), pruned only of ids no longer present.
 
-### Known limitations (`drop-oldest`)
+### Known limitations (`sliding-window`)
 
 The conductor decides at **block** granularity, but the host enforces deletion at **whole-message
 + tool-pair** granularity (`createGroup` snaps a run outward to whole messages; `applyPlan`
