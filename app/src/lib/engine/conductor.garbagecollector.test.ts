@@ -314,6 +314,34 @@ describe("GarbageCollectorConductor — reachability ordering", () => {
 		expect(folded.has("m2:r"), "T should fold — the mid-session user is not a root").toBe(true);
 		expect(folded.size).toBe(1);
 	});
+
+	it("mid-session user must NOT become a root when the first user is HELD", () => {
+		// Regression: when the first user block is held (human-pinned), the root-selection
+		// loop must still set firstUserSeen so later user blocks don't become roots.
+		// Without the fix, held first-user → firstUserSeen stays false → next user becomes
+		// a root → blocks reachable only from that mid-session user wrongly stay live.
+		const PATH = "src/legacy.ts";
+		const blocks: ViewBlock[] = [
+			// First user — HELD (human pinned the original task). Shares nothing with PATH.
+			vb("m0:p0", "user", 0, 500, 500, { held: true, text: "begin the project" }),
+			// Mid-session user mentions PATH. Must NOT be a root.
+			vb("m1:p0", "user", 1, 500, 500, { text: `also touch \`${PATH}\` later` }),
+			// T: tool_result sharing PATH only with the mid-session user → unreachable.
+			vb("m2:r", "tool_result", 2, 1500, 30, { text: `reading \`${PATH}\`` }),
+			// U: unrelated tool_result → unreachable.
+			vb("m3:r", "tool_result", 3, 1500, 30, { text: "reading `src/other.ts`" }),
+			// Tail (root) mentions nothing shared.
+			vb("m4:p0", "text", 4, 1500, 100, { protected: true, text: "current work continues" }),
+		];
+		// liveTokens 5500; budget 4500 → fold one. T and U are both unreachable; T folds
+		// first (order 2 < 3). If the mid-session user were wrongly a root, T would stay
+		// live and U would fold instead.
+		const view = makeView(blocks, 4_500, 5_500);
+		const folded = foldIdsOf(new GarbageCollectorConductor().conduct(view));
+
+		expect(folded.has("m2:r"), "T should fold — mid-session user is not a root even when first user is held").toBe(true);
+		expect(folded.size).toBe(1);
+	});
 });
 
 // ── 6. Reachable fallback — budget guarantee wins over reachability ──────────

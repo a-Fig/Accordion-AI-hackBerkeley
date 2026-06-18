@@ -95,12 +95,9 @@ export class GarbageCollectorConductor implements Conductor {
 		const roots: string[] = [];
 		let firstUserSeen = false;
 		for (const b of view.blocks) {
-			if (b.protected || b.held) {
-				roots.push(b.id);
-			} else if (!firstUserSeen && b.kind === "user") {
-				roots.push(b.id);
-				firstUserSeen = true;
-			}
+			const isFirstUser = !firstUserSeen && b.kind === "user";
+			if (isFirstUser) firstUserSeen = true;
+			if (b.protected || b.held || isFirstUser) roots.push(b.id);
 		}
 		const marked = markReachable(buildGraph(view.blocks), roots);
 
