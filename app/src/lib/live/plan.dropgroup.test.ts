@@ -64,7 +64,7 @@ describe("groupLiveTokens — drop group has 0 carrier cost", () => {
 
 	it("a drop group with a straggler — straggler stays live at full tokens", () => {
 		// r:c1 .. u:2: r:c1's call (a:r1:p2) is outside → straggler. u:2 collapses → carrier 0.
-		// Wait — with digest:null the carrier still = 0, but the straggler adds its full tokens.
+		// With digest:null the carrier is 0, but the straggler adds its full tokens (stays live).
 		const s = makeStore();
 		s.groups = [{ id: "g:r:c1", memberIds: ["r:c1", "u:2"], folded: true, by: "auto", digest: null }];
 		const g = s.groups[0];
@@ -118,10 +118,9 @@ describe("computeGroupOps — drop group emits summaryText: null", () => {
 		expect(ops[0].summaryText).toBeNull();
 	});
 
-	it("empty-string digest is NOT a drop — emits nothing (invalid non-drop, filtered)", () => {
+	it("empty-string digest IS a drop — emits summaryText: null (not skipped)", () => {
 		const s = makeStore();
-		// Empty string means isDropGroup is true → summaryText will be null → emitted
-		// Wait: per spec, "" IS a drop (isDropGroup covers null || ""). So it emits null.
+		// "" is a drop (isDropGroup covers null || ""), so computeGroupOps emits null, not skip.
 		s.groups = [{ id: "g:u:2", memberIds: ["u:2", "a:r2:p0"], folded: true, by: "auto", digest: "" }];
 		const ops = computeGroupOps(s);
 		// isDropGroup("") = true → summaryText = null → emitted (not skipped)

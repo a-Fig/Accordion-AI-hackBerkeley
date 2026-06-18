@@ -1065,7 +1065,9 @@
 											class:drop-group={store.isDropGroup(g)}
 											class:sel={selectedId === g.id}
 											data-group={g.id}
-											title="{live ? 'group (unfolded — live)' : 'group (peek — preview only)'} · {seg.row.members.length} blocks · double-click to collapse"
+											title={store.isDropGroup(g)
+												? `drop group · ${seg.row.members.length} blocks · The agent does not see this block · double-click to collapse`
+												: `${live ? 'group (unfolded — live)' : 'group (peek — preview only)'} · ${seg.row.members.length} blocks · double-click to collapse`}
 										></div>
 										<div class="band-members">
 											{#each seg.row.members as mb (mb.id)}
