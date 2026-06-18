@@ -25,8 +25,8 @@ reversible folding is designed to beat — not a conductor to reach for in pract
   cannot undo information lost in turn 1's summary, so errors and omissions accumulate. This
   is the exact failure mode that reversible folding avoids.
 
-See [ADR 0011](../../docs/adr/0011-compaction-foil.md) (the foil rationale) and
-[ADR 0012](../../docs/adr/0012-host-capabilities.md) (host capabilities) for background.
+See [ADR 0013](../../docs/adr/0013-conductor-host-capabilities.md) (host capabilities) and
+[ADR 0014](../../docs/adr/0014-naive-compaction-conductor.md) (the foil rationale) for background.
 
 ## How it works
 

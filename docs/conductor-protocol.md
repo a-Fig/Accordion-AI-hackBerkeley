@@ -161,6 +161,7 @@ A **`ClampReport`** is `{ command, ids, reason, detail }`. `reason` is one of:
 | `grouped`        | the block is inside a folded group; the group overlay owns it                  |
 | `invalid-group`  | a `group`'s ids were not a valid contiguous, ungrouped, ≥1-member run entirely outside the protected tail |
 | `protected`      | the block is inside the active protected working tail; the host refuses to fold it. Without `tail-size` this is the human's `protectTokens` tail; with `tail-size` it is the conductor's declared `tailTokens` tail (`tailTokens = 0` ⇒ no tail, no `protected` clamps). See ADR 0011 |
+| `not-foldable`   | the command targeted a kind the engine never folds/replaces (`user` or `tool_call`) |
 | `noop`           | the command was a no-op (e.g. restoring an already-live block)                 |
 
 In-process, `conduct()` returns and the host applies synchronously; the clamp reports are
@@ -311,7 +312,7 @@ reverted by host healing). Each `block` is a `ViewBlock` — its `text` is prese
 ```
 
 `reason` is one of the `ClampReason`s tabled in Part 1 (`unknown-id`, `human-override`,
-`grouped`, `invalid-group`, `protected`, `noop`). Commands are never silently dropped — every
+`grouped`, `invalid-group`, `protected`, `not-foldable`, `noop`). Commands are never silently dropped — every
 clamp is reported.
 
 **`cap/result`** — answer to a `cap/request` you sent (same `reqId`).
@@ -378,6 +379,7 @@ tokenizer). The host answers with a `cap/result` carrying the same `reqId`.
 | `countTokens`  | `text`           | token estimate (number) for `text`                               |
 | `getContent`   | `ids[0]`         | full text of that block (for `wants:"onDemand"`)                 |
 | `getDigest`    | `ids[0]`         | the engine's per-kind folded digest (incl. the `{#code FOLDED}` tag) |
+| `complete`     | `completion`     | out-of-band model completion result (text/model/usage); see Part 3 |
 
 **`conductor/status`** — *display-only* telemetry: a one-line summary of what you are
 calculating, for the host to surface to a human near the conductor switcher.
@@ -505,7 +507,7 @@ instance-state reads and command emission.
 | method | signature | meaning |
 |--------|-----------|---------|
 | `can` | `(capability: HostCapabilityId) => boolean` | Is this capability available right now? Always call this before depending on `complete`. Returns `false` when the extension is disconnected, the session is read-only (Claude Code transcript), or no model link exists. `"countTokens"` and `"digest"` are always `true`. |
-| `complete` | `(req: CompletionRequest) => Promise<CompletionResult>` | Run an out-of-band model completion asynchronously. Not on the `conduct()` hot path — use the async pattern above. Rejects if `"complete"` is unavailable, the model id is unknown, or the `AbortSignal` fires. |
+| `complete` | `(req: CompletionRequest) => Promise<CompletionResult>` | Run an out-of-band model completion asynchronously. Not on the `conduct()` hot path — use the async pattern above. Rejects if `"complete"` is unavailable or the `AbortSignal` fires. In this version, specific model id strings are reserved for future use and treated as `"current"`. |
 | `countTokens` | `(text: string) => number` | Synchronous token estimate for `text` using the host's tokenizer (chars/4 for Accordion's default). Safe to call inside `conduct()`. |
 | `digestOf` | `(id: string) => string \| null` | The engine's per-kind folded digest for block `id` — the exact string the agent receives when that block is folded (including the `{#code FOLDED}` tag). Returns `null` if the block is unknown. Synchronous; safe inside `conduct()`. |
 | `setStatus` | `(text: string \| null, metrics?: Record<string, number \| string \| boolean>) => void` | Surface display-only conductor status to the human. `null`/empty clears it. This never steers context; it is for visible unavailable/working/error states. |
@@ -521,7 +523,7 @@ instance-state reads and command emission.
 | `system` | `string?` | Optional system instruction — e.g. a compaction persona or template. |
 | `maxOutputTokens` | `number?` | Requested cap on output tokens. The extension clamps this to the model's own max-output ceiling before forwarding, so a conductor can safely pass any positive number without risking a provider rejection. The model enforces the (clamped) value as a hard cap — over-long output is truncated, not rejected. Omit to use the model default. |
 | `signal` | `AbortSignal?` | Abort signal from an `AbortController` you hold. Pass `controller.signal` here; call `controller.abort()` from `detach()` so stale completions do not race back after the conductor is gone. |
-| `model` | `"current" \| string?` | `"current"` (default when omitted) = the user's live session model. A specific model id overrides — useful for a cheap distillation model distinct from the agent model. Rejects if unknown. |
+| `model` | `"current" \| string?` | `"current"` (default when omitted) = the user's live session model. A specific model id string is reserved for future use and, in this version, is treated as `"current"`. |
 
 ## `CompletionResult` fields
 

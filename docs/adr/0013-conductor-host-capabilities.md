@@ -1,4 +1,4 @@
-# ADR 0011 — Conductor host capabilities: injecting the model link into in-process conductors
+# ADR 0013 — Conductor host capabilities: injecting the model link into in-process conductors
 
 **Status:** accepted
 **Date:** 2026-06-15

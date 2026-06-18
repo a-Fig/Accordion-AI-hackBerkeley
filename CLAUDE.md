@@ -229,8 +229,8 @@ the conductor).
   break it.
 - **Host capabilities are first-class on the `Conductor` interface.** An optional
   `attach(host: ConductorHost)` lifecycle hook (called once before the first `conduct()`) injects
-  a `ConductorHost` handle with five methods: `can`, `complete`, `countTokens`, `digestOf`,
-  `requestRerun`. `"complete"` is the first real capability — how LLM summarisation calls come to
+  a `ConductorHost` handle with six methods: `can`, `complete`, `countTokens`, `digestOf`,
+  `setStatus`, `requestRerun`. `"complete"` is the first real capability — how LLM summarisation calls come to
   Accordion: the conductor fires `host.complete(req)` off-path, holds with `null`, stashes the
   result in instance state, then calls `host.requestRerun()` to re-run `conduct()` and emit
   commands. `conduct()` stays synchronous throughout. `detach()` (optional) lets the conductor
@@ -273,7 +273,7 @@ the conductor).
     folding. `tool_call` blocks are excluded from the aged region entirely (the conductor never
     emits a `replace` on them), consistent with the engine's "tool_call is never folded"
     invariant; the host's `substOne` has no kind-check and would apply a replace verbatim, so
-    the conductor enforces this itself. See ADR 0011 / 0012.
+    the conductor enforces this itself. See [ADR 0013](docs/adr/0013-conductor-host-capabilities.md) / [ADR 0014](docs/adr/0014-naive-compaction-conductor.md).
 
 ## Visual grammar (consistent across ALL views)
 

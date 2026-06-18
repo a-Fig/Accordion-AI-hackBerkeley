@@ -112,7 +112,8 @@ A conductor can request an out-of-band model completion via the `ConductorHost` 
 through the optional `attach(host)` lifecycle hook. The full reference — the `ConductorHost`
 method table, `CompletionRequest`/`CompletionResult` fields, `can()` availability, the wire
 transport for out-of-process conductors, and the version notes — is in
-[**Part 3 of `docs/conductor-protocol.md`**](../docs/conductor-protocol.md).
+[**Part 3 of `docs/conductor-protocol.md`**](../docs/conductor-protocol.md) and
+[ADR 0013](../docs/adr/0013-conductor-host-capabilities.md).
 
 The key pattern in six lines:
 
@@ -181,7 +182,7 @@ session is currently active.
 | [`sliding-window/`](sliding-window/) | TypeScript | in-process | **Hard-delete oldest non-user blocks.** A high-water/low-water band: when the agent-visible window crosses ~90% of budget it issues `group` commands with `digest: null` (DROP) over the oldest non-`user` blocks — skipping user messages, which stay live — down to ~70%, then **holds** (re-emitting the deletes) while the window refills. Carries a monotonic drop-set as instance state. Locks `human-steering` + `agent-unfold` (NOT `tail-size`). Known limitations (bounded, self-correcting straggler/snap overshoot): see [ADR 0006](../docs/adr/0006-multiblock-folds.md#known-limitations-sliding-window). |
 | [`garbage-collector/`](garbage-collector/) | TypeScript | in-process | **Reachability-based folder.** Treats context as a managed heap: roots = protected tail + human-held + the first `user` message; a reference graph (entity identifiers shared with cold-score's extractor, `callId` causal pairs, same-message id-prefix links) seeds a mark phase, and the sweep folds UNREACHABLE candidates first, falling back to reachable ones only under budget pressure. Collaborative (no locks). See [ADR 0012](../docs/adr/0012-garbage-collector-conductor.md). |
 | [`recency-folder/`](recency-folder/) | Node.js | out-of-process (WS) | **Wire example.** Folds the oldest non-protected `tool_result` blocks until under budget, and auto-advertises for discovery. Intentionally crude — copy it and grow your own. |
-| [`compaction-naive/`](compaction-naive/) | TypeScript | in-process | **Naive compaction baseline.** Summarizes aged context into a single prose blob via `host.complete`; lossy + recursive (each compaction only sees the prior summary — compounding amnesia). No `{#code FOLDED}` tag → the agent cannot self-unfold. The intentional foil that reversible folding is designed to beat. |
+| [`compaction-naive/`](compaction-naive/) | TypeScript | in-process | **Naive compaction baseline.** Summarizes aged context into a single prose blob via `host.complete`; lossy + recursive (each compaction only sees the prior summary — compounding amnesia). No `{#code FOLDED}` tag → the agent cannot self-unfold. The intentional foil that reversible folding is designed to beat. See [ADR 0014](../docs/adr/0014-naive-compaction-conductor.md). |
 
 ### Garbage-collector conductor
 

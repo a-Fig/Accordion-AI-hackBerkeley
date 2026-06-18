@@ -1,10 +1,10 @@
-# ADR 0012 — Naive compaction conductor: a deliberate lossy baseline
+# ADR 0014 — Naive compaction conductor: a deliberate lossy baseline
 
 **Status:** accepted
 **Date:** 2026-06-15
 **Builds on:** [ADR 0007](0007-conductor-protocol.md) (the conductor seam), [ADR
 0008](0008-conductor-first-party-one-view.md) (first-party conductors, one public
-`ConductorView`), [ADR 0011](0011-conductor-host-capabilities.md) (`ConductorHost.complete`
+`ConductorView`), [ADR 0013](0013-conductor-host-capabilities.md) (`ConductorHost.complete`
 — the mechanism this conductor depends on for its model call).
 
 ## Context
@@ -54,7 +54,7 @@ as closely as possible within the conductor contract, so:
 `Conductor` and is registered in `IN_PROCESS_CONDUCTORS` (`conductors/index.ts`) alongside
 the built-in and cold-score conductors. It appears in the header switcher automatically.
 
-It uses `attach(host)` and `detach()` from ADR 0011 — `host.complete()` for the model call
+It uses `attach(host)` and `detach()` from ADR 0013 — `host.complete()` for the model call
 and `host.requestRerun()` to re-enter after the async result arrives. No Svelte, no `$state`,
 no engine imports; types only from `../contract`.
 
@@ -62,7 +62,7 @@ no engine imports; types only from `../contract`.
 
 `conduct()` fires on every context change. The conductor only acts when
 `liveTokens >= 0.95 * view.budget`. Below that threshold it re-emits whatever commands are
-already committed (the `currentCommands()` helper) or returns `[]` if nothing has been
+already committed (via `buildCommands(view)`) or returns `[]` if nothing has been
 compacted yet. This matches the "context is almost full — summarize now" semantics that
 tools like Cursor use, and avoids unnecessary model calls during normal turns.
 
@@ -70,14 +70,16 @@ tools like Cursor use, and avoids unnecessary model calls during normal turns.
 
 ```
 for (let i = 0; i < view.protectedFromIndex && i < view.blocks.length; i++) {
-    if (!b.held && !b.grouped) agedBlocks.push(b);
+    const b = view.blocks[i];
+    if (b.kind !== "tool_call" && !b.held && !b.grouped) agedBlocks.push(b);
 }
 ```
 
 The protected working tail passes through verbatim — its blocks receive no `replace` command.
 Compacting into the protected tail would destroy the agent's live reasoning, which the
 conductor has no business touching. Human-held blocks (`b.held`) are also skipped, honouring
-the "human overrides always win" rule (ADR 0007).
+the "human overrides always win" rule (ADR 0007). `tool_call` blocks are skipped because the
+host's replacement path does not kind-check them; the conductor must not orphan tool results.
 
 ### 4. Commands: `replace`, not `fold`
 
@@ -96,11 +98,11 @@ what it sees. The human can always detach this conductor (context returns to raw
 to the built-in to recover, but the agent cannot do it through normal means. That asymmetry
 faithfully reproduces what mainstream compaction tools do.
 
-**Provider-validity note.** Emptying a `tool_call` block via `replace(id, "")` may trip
-the host's provider-validity floor (some providers require a `tool_call` to have a
-matching `tool_result`). The host clamps those commands to a safe form and returns
-`ClampReport`s. This is expected and safe for this baseline — the conductor does not track
-clamp reports, and the host's clamping is the documented safety net (ADR 0007).
+**Provider-validity note.** The conductor excludes `tool_call` blocks from the aged region
+entirely: they are never selected as the summary head and never receive an empty
+`replace(id, "")`. The host's substitution path applies `replace` commands verbatim and
+does not kind-check `tool_call` blocks, so the conductor self-enforces this invariant rather
+than relying on a clamp. Matching `tool_result` blocks may still be compacted when safe.
 
 ### 5. Recursive amnesia: the compaction prompt is built from the summary, not the originals
 
@@ -127,14 +129,15 @@ that Accordion's reversible approach is designed to avoid.
 ### 6. In-flight guard and retry prevention
 
 The conductor holds one `AbortController` in `this.inflight` while a completion is running.
-`conduct()` returns `this.currentCommands()` (null on the first trip — hold/raw) while
+`conduct()` returns `this.buildCommands(view)` (null/hold on the first trip if there is no
+summary yet) while
 inflight is set, preventing a second model call from launching before the first resolves.
 
-After a failed completion (the promise rejects), `lastLaunchedAgedIds` is NOT cleared. On
-the next `conduct()` call, `newlyAged.filter(b => !compactedIds.has(b.id))` will only be
-non-empty if genuinely new blocks have been added since the failure. This prevents a tight
-model-hammering loop on a persistent failure — the conductor only retries when there is
-new work to do, not just because the context is still over budget.
+After a failed completion (the promise rejects), `lastAttemptKey` remains keyed to the set of
+newly aged ids that triggered the attempt. On the next `conduct()` call, the conductor only
+launches again if that key changes — i.e. genuinely new blocks have aged in. This prevents a
+tight model-hammering loop on a persistent failure; the conductor retries when there is new
+work to do, not merely because the context is still over budget.
 
 `detach()` aborts any in-flight completion so stale results do not call `host.requestRerun()`
 after the conductor is detached.
@@ -186,21 +189,18 @@ itself has no path to it.
 
 **Known characteristics.**
 
-- **Provider-validity clamps on `tool_call` empties.** When the conductor empties a
-  `tool_call` block's content, the host's provider-validity floor may clamp the op and
-  return a `ClampReport`. The conductor does not track these. This is expected and safe —
-  the clamp ensures the message stays sendable, and the summary on the head block still
-  represents the overall aged region adequately for the baseline.
+- **`tool_call` blocks stay live.** The conductor never emits a `replace` for a
+  `tool_call`, because emptying one can orphan the matching `tool_result` for providers
+  that validate tool-call structure. This means a very old tool call can remain live while
+  surrounding text/thinking/tool-result blocks are compacted.
 - **First compaction holds state (returns `null`).** Before the first summary completes,
-  `currentCommands()` returns `null` (no summary, no head). The host holds the last
+  `buildCommands(view)` returns `null` (no summary, no head). The host holds the last
   applied state, which is raw. The aged region remains live until the first summary
   commits. This is correct: the conductor cannot produce a summary it hasn't computed yet.
-- **The degrade-path group range may widen.** On a second degrade call, `agedBlocks`
-  (blocks not held and not grouped) may include blocks that the *first* degrade call's
-  `group` command put into a group overlay — those blocks now appear `grouped: true` in the
-  view, so they are excluded from `agedBlocks`, narrowing the degrade group. This can leave
-  a gap between the group's span and the new agedBlocks span. Documented but not fixed; the
-  degrade path is best-effort.
+- **Unavailable completion is visible, not hidden.** When `host.can("complete")` is false,
+  the conductor preserves any existing LLM summary, leaves newly-aged blocks live, and uses
+  `host.setStatus(...)` to tell the human it is waiting for a live model link. It does not
+  switch to deterministic grouping under the same selector.
 - **No self-unfold path.** The agent cannot call `unfold` to recover a compacted block.
   The `replace` content does not carry a `{#code FOLDED}` tag. This is the entire point of
   the conductor's existence as a foil.
@@ -212,5 +212,5 @@ itself has no path to it.
 - No per-section quality heuristics or re-summarization on failure.
 - No automatic re-attach after a persistent model error; the human must re-select the
   conductor.
-- The degrade path produces a host-generated group digest, not a model-generated summary —
-  it is a structural fallback, not a quality-preserving one.
+- No deterministic fallback: if completion is unavailable, the conductor waits visibly for
+  the live model link instead of producing a host-generated group digest.
