@@ -3,28 +3,54 @@
  *
  * PURPOSE: This conductor exists as a deliberate BASELINE / FOIL that demonstrates
  * what mainstream AI coding tools do today. When the context approaches capacity,
- * it calls an LLM to summarize the aged history into a single prose blob and presents
- * the agent the summary instead of the real conversation history.
+ * it calls an LLM to summarize the aged history into a single prose summary and
+ * presents the agent that one summary IN PLACE of the whole aged region — faithfully
+ * reproducing what Cursor's composer, Claude Code's `/compact`, and similar tools do.
  *
  * It is DELIBERATELY LOSSY AND RECURSIVE:
- *   - Lossy: the original blocks are replaced by a generated summary. The agent cannot
- *     recover the originals (no {#code FOLDED} tag → no self-unfold). From the agent's
- *     perspective, the history is gone — faithfully reproducing the behaviour of tools
- *     like Cursor's composer or Claude Code's own /compact command.
- *   - Recursive: each subsequent compaction summarizes the PRIOR SUMMARY + newly aged
- *     blocks. It never re-reads the original blocks already compressed. This self-imposed
- *     amnesia compounds quality loss over a session — exactly the failure mode Accordion's
- *     reversible folding is designed to avoid.
+ *   - Lossy: the aged blocks are collapsed into ONE group whose digest is the generated
+ *     summary. There is no `{#code FOLDED}` tag on the summary, so the agent cannot call
+ *     `unfold` to recover the originals. From the agent's perspective the history is gone
+ *     — exactly the mainstream-tool behaviour. The human can always DETACH this conductor
+ *     to recover full history (that is Accordion being Accordion), but the agent cannot.
+ *     That asymmetry is the whole point.
+ *   - Recursive: each subsequent compaction summarizes the PRIOR SUMMARY + only the
+ *     newly aged blocks. It never re-reads the originals already compressed. This
+ *     self-imposed amnesia compounds quality loss over a session — the exact failure
+ *     mode Accordion's reversible folding is designed to avoid.
  *
- * The human can always DETACH this conductor to recover full history — that's Accordion
- * being Accordion — but the agent cannot. That asymmetry is the whole point.
+ * SHAPE — close cousin of the sliding-window conductor. Where sliding-window emits
+ * `group(digest: null)` (DROP the aged run from the wire) to keep a live window, this
+ * conductor emits `group(digest: <LLM summary>)` (REPLACE the aged run with one summary
+ * message). Same single-group-over-the-aged-run shape; only the digest differs. The host
+ * snaps the run outward to whole messages and pair-balances `tool_call`/`tool_result`,
+ * so no tool result is ever orphaned.
  *
- * REPLACE-TARGET SAFETY: this conductor only emits `replace` commands for block kinds the
- * host can actually represent on the wire (`text`, `thinking`, and `tool_result`). The host
- * is still the final safety net — it clamps non-foldable `user`/`tool_call` targets with
- * `not-foldable` — but relying on that clamp would break this conductor's own invariant: the
- * summary must land on a valid head before any other block is emptied. Non-foldable blocks
- * therefore stay live and are never command targets.
+ * TRIGGER — sliding-window-style hysteresis. `view.liveTokens` is the RAW, fully-unfolded
+ * size (the host clears conductor folds before every pass), so it only grows; a naive
+ * `liveTokens >= 90%` test would re-trigger on every pass once first crossed. Instead the
+ * conductor tracks the token SAVING its summary group provides and triggers on the VISIBLE
+ * window: `visible = liveTokens − (Σ survivor tokens − summary token cost)`. When
+ * `visible >= 90%` of budget AND there are newly-aged blocks to fold in, it launches a
+ * completion; otherwise it HOLDS, re-emitting the existing summary group. Compacting the
+ * newly-aged blocks drops `visible` well below 90%, and the conductor waits for the window
+ * to refill before acting again — the same high-water band sliding-window uses.
+ *
+ * AMNESIA / MONOTONIC COVER. `compactedIds` is the monotonic set of block ids already
+ * represented by the summary (the sliding-window `dropped` set's analog — only ever grows
+ * within a session). At trigger the conductor feeds the LLM `prior summary + newly-aged
+ * originals` only; the originals already compressed are deliberately not re-read. The
+ * summary group covers `compactedIds ∩ aged region` — the oldest aged blocks, which (because
+ * blocks age in order and `human-steering` keeps the region contiguous) form a single
+ * contiguous run → one group, one summary tile.
+ *
+ * USER MESSAGES ARE PRESERVED VERBATIM inside the summary (Claude-Code `/compact`
+ * behaviour): the system prompt instructs the model to reproduce every user message
+ * word-for-word in a dedicated section. `user` intent therefore survives compaction
+ * intact across the whole session; only assistant reasoning degrades — the faithful foil.
+ *
+ * All block kinds (`user`, `text`, `thinking`, `tool_call`, `tool_result`) are swallowed
+ * by the group. The host's whole-message snap + pair-balance keeps the result wire-valid.
  *
  * No Svelte, no $state, no engine imports. Types only from ../contract.
  */
@@ -36,6 +62,9 @@ import type {
 	ViewBlock,
 	Command,
 } from "../contract";
+
+/** Fraction of budget at which compaction triggers (high-water mark). */
+const TRIGGER = 0.9;
 
 /**
  * Soft cap on summary output tokens.
@@ -54,17 +83,28 @@ import type {
 const MAX_SUMMARY_TOKENS = 8000;
 
 /**
- * System prompt for the compaction LLM call. Industry-standard template asking for a
- * structured summary that preserves the most important signals for the agent continuing
- * the conversation.
+ * System prompt for the compaction LLM call. Industry-standard structured-briefing template,
+ * with one sacred rule lifted from Claude Code's `/compact`: user messages are reproduced
+ * VERBATIM so the human's intent and instructions survive every compaction intact. Only
+ * assistant text/thinking/tool calls/tool results are summarized.
  */
 const COMPACTION_SYSTEM = `\
 You are a context-compaction assistant. Your job is to summarize a segment of an AI \
 assistant's conversation history into a compact, structured briefing that the assistant \
 can use to continue working effectively without seeing the original messages.
 
+USER MESSAGES ARE SACRED. Reproduce EVERY user message VERBATIM, in order, exactly as \
+originally written, in the "## User messages" section. Do not paraphrase, abbreviate, \
+summarize, or omit a single user message — the human's intent and instructions must \
+survive compaction intact. (Assistant text, thinking, tool calls, and tool results ARE \
+summarized; only user messages are preserved word-for-word.)
+
 Produce your output in EXACTLY this structure — no prose outside the sections, no \
 omissions:
+
+## User messages
+Every user message from the summarized segment, reproduced verbatim, in order, each \
+clearly separated. If there are no user messages, write "none".
 
 ## Goal
 One sentence: what is the overall task or objective being pursued?
@@ -86,8 +126,9 @@ Any facts, invariants, or constraints the assistant MUST remember: API keys patt
 human's instructions, hard constraints on scope. Err on the side of including \
 something here if it would be surprising to lose it.
 
-Be terse. Every sentence should earn its place. Omit pleasantries, meta-commentary, \
-and filler. The output will be placed directly into the agent's context window.`;
+Be terse everywhere EXCEPT the verbatim user messages, which must be complete. Omit \
+pleasantries, meta-commentary, and filler. The output will be placed directly into the \
+agent's context window.`;
 
 export class NaiveCompactionConductor implements Conductor {
 	readonly id = "compaction-naive";
@@ -97,26 +138,28 @@ export class NaiveCompactionConductor implements Conductor {
 	 * Involvement locks (ADR 0011). This conductor takes EXCLUSIVE control of the two
 	 * STEERING controls — the human's hand fold/unfold/pin/group/reset and the agent's
 	 * `unfold` tool — so the user, the agent, and the conductor cannot fight over the same
-	 * blocks while a compaction pass is replacing them. Naive compaction reasons over a
-	 * deterministic aged region and rewrites it in place; a stray human unfold or agent
-	 * unfold mid-pass would desync its `compactedIds`/`summary` state from the live view.
-	 * Locking those two domains gives it the deterministic world the foil needs.
+	 * blocks while a compaction pass is rewriting them. `human-steering` is load-bearing for
+	 * the single-group shape: under that lock the human cannot pin or group a block inside
+	 * the aged region, so the region stays CONTIGUOUS and the one `group` command covering
+	 * it is always valid (the host refuses a run that spans a human-held block). Dropping the
+	 * lock would let a held block split the region, fragmenting the single summary tile.
 	 *
 	 * It deliberately does NOT lock `tail-size`. Under that lock the host sets
 	 * `protectedFromIndex = view.blocks.length` (no host tail floor), which would make the
-	 * aged-region scan (`i < view.protectedFromIndex`) cover the WHOLE conversation — the
-	 * conductor would then compact the agent's live working tail. Mainstream compaction keeps
-	 * recent turns verbatim, so this conductor relies on the host's protected tail and leaves
-	 * `tail-size` unlocked: the human may still resize the tail (it merely reshapes the aged
-	 * region the conductor deterministically obeys), but cannot reach into the compacted blocks.
-	 * Edge: a human who drags the tail to 0 has explicitly opted out of a protected tail, so the
-	 * aged region then extends to the newest turn and compaction may summarize recent reasoning —
-	 * that is the human's own setting being honored, not a fight the conductor loses.
+	 * aged region cover the WHOLE conversation — the conductor would compact the agent's live
+	 * working tail. Mainstream compaction keeps recent turns verbatim, so this conductor
+	 * relies on the host's protected tail and leaves `tail-size` unlocked: the human may still
+	 * resize the tail (it merely reshapes the aged region the conductor obeys), but cannot
+	 * reach into the compacted blocks. Edge: a human who drags the tail to 0 has explicitly
+	 * opted out of a protected tail, so the aged region then extends to the newest turn and
+	 * compaction may summarize recent reasoning — that is the human's own setting being
+	 * honored, not a fight the conductor loses.
 	 *
-	 * Note on `agent-unfold`: because this conductor uses `replace` (no `{#code FOLDED}` tags),
-	 * the agent never has a fold code for a compacted block — so it could not `unfold` (or even
-	 * `recall`) one regardless. The lock is the honest declaration of intent ("the agent does
-	 * not steer here") and future-proofs against the agent unfolding any OTHER folded block.
+	 * Note on `agent-unfold`: because this conductor emits a `group` (no `{#code FOLDED}`
+	 * tags), the agent never has a fold code for a compacted block — so it could not `unfold`
+	 * (or even `recall`) one regardless. The lock is the honest declaration of intent ("the
+	 * agent does not steer here") and future-proofs against the agent unfolding any OTHER
+	 * folded block.
 	 */
 	readonly locks = ["human-steering", "agent-unfold"] as const;
 
@@ -125,12 +168,13 @@ export class NaiveCompactionConductor implements Conductor {
 	/** Injected by attach(); null until the conductor is attached. */
 	private host: ConductorHost | null = null;
 
-	/** The current compaction summary text. Null until the first summary completes. */
+	/** The current compaction summary text (with its count preamble). Null until the first summary completes. */
 	private summary: string | null = null;
 
 	/**
-	 * The block ids currently represented by the summary. Includes the head block
-	 * (which CARRIES the summary text) and all other aged blocks emptied behind it.
+	 * The block ids currently represented by the summary — the monotonic "already
+	 * summarized" set (the sliding-window `dropped` set's analog). Grows only within a
+	 * session; cleared on attach. The summary group covers `compactedIds ∩ aged region`.
 	 * Empty until the first summary completes.
 	 */
 	private compactedIds: Set<string> = new Set();
@@ -190,166 +234,178 @@ export class NaiveCompactionConductor implements Conductor {
 		// Cannot operate without a host (e.g. headless test without attach).
 		if (!this.host) return null;
 
-		// The THRESHOLD at which compaction is triggered: 95 % of the token budget.
-		const threshold = 0.95 * view.budget;
+		// AGED REGION: every block older than the protected working tail that is not
+		// human-held and not already inside a (non-conductor) group. ALL kinds are included
+		// — user, text, thinking, tool_call, tool_result — because the single summary group
+		// swallows the whole region and the host's whole-message snap + pair-balance keeps
+		// the result wire-valid. `tool_call`/`tool_result` pairs are never orphaned: the host
+		// folds a call together with its result or neither.
+		const aged = this.agedRegion(view);
 
-		// AGED REGION: blocks eligible to summarize = older than the protected working tail,
-		// not human-held, not already inside a conductor group, and NOT tool_call. `tool_call`
-		// stays live so a tool invocation is never summarized away from its result. `user` blocks
-		// may be included in the prompt for context, but buildCommands() will never target them
-		// with `replace` because the host cannot represent per-block folds for user intent.
-		const agedBlocks: ViewBlock[] = [];
-		for (let i = 0; i < view.protectedFromIndex && i < view.blocks.length; i++) {
-			const b = view.blocks[i];
-			if (!b.held && !b.grouped && b.kind !== "tool_call") agedBlocks.push(b);
+		// Degenerate config / empty session: nothing to manage. Hold any existing summary.
+		if (view.budget <= 0 || view.blocks.length === 0) {
+			return this.summary !== null ? this.emitSummaryGroup(view) : [];
 		}
 
-		// If there is nothing aged and no prior summary, nothing to do — return raw.
-		if (agedBlocks.length === 0 && this.summary === null) return [];
-
 		// If a completion is in-flight, hold the current state — never launch a second.
-		if (this.inflight !== null) return this.buildCommands(view);
+		if (this.inflight !== null) return this.emitSummaryGroup(view);
 
-		// Determine what is genuinely new since the last successful compaction.
-		const newlyAged: ViewBlock[] = agedBlocks.filter((b) => !this.compactedIds.has(b.id));
-		const newlyReplaceable = newlyAged.filter(isReplaceableByHost);
+		// The blocks already represented by the summary that are still in the aged region.
+		// These are what the summary group covers, and their tokens are the saving that
+		// shrinks the VISIBLE window below the raw `liveTokens`.
+		const survivors = aged.filter((b) => this.compactedIds.has(b.id));
 
-		// Decide whether to (re)summarize:
-		// trigger only when >= 95% full AND there are newly aged blocks the host can actually
-		// replace/fold. Non-foldable `user` blocks may provide prompt context when a foldable
-		// neighbour ages with them, but they should not by themselves burn a completion call.
-		const needSummary = view.liveTokens >= threshold && newlyReplaceable.length > 0;
+		// VISIBLE window = raw baseline minus the token saving the summary group provides.
+		// `view.liveTokens` is the RAW size (host clears conductor folds each pass), so
+		// without subtracting the saving the 90% trigger would fire on every pass once first
+		// crossed. This is the sliding-window hysteresis computation, with the summary's own
+		// token cost counted back in (the group replaces the survivors with the summary text).
+		const savedTokens = this.summary !== null
+			? Math.max(0, sumTokens(survivors) - this.summaryTokenCost())
+			: 0;
+		const visible = view.liveTokens - savedTokens;
+		const overThreshold = visible >= view.budget * TRIGGER;
 
+		// What is genuinely new since the last successful compaction.
+		const newlyAged = aged.filter((b) => !this.compactedIds.has(b.id));
+
+		// Nothing aged and no prior summary → nothing to do, clear to raw.
+		if (aged.length === 0 && this.summary === null) {
+			this.host.setStatus(null);
+			return [];
+		}
+
+		// Trigger only when the VISIBLE window is at/over the high-water mark AND there are
+		// newly-aged blocks to fold in. Below the mark, or with nothing new, HOLD: re-emit the
+		// existing summary group (or clear to raw if no summary yet).
+		const needSummary = overThreshold && newlyAged.length > 0;
 		if (!needSummary) {
 			this.host.setStatus(null);
-			// Conductor has a definite synchronous answer: nothing to compact right now.
-			// Return the existing summary commands if we have one; otherwise clear to raw.
-			// Do NOT return null here — null means "still thinking / in-flight", which
-			// is false: we have a definite answer.
-			return this.summary !== null ? this.buildCommands(view) : [];
+			return this.summary !== null ? this.emitSummaryGroup(view) : [];
 		}
 
 		// DEGRADE path: if the host cannot run completions (live model not connected),
-		// report unavailability by preserving the current state.
-		// No deterministic grouping fallback: this conductor is specifically the LLM-summary
-		// baseline, so if the host cannot complete we wait visibly rather than silently
-		// switching strategies.
+		// report unavailability and preserve the current state. No deterministic grouping
+		// fallback: this conductor is specifically the LLM-summary baseline, so if the host
+		// cannot complete we wait visibly rather than silently switching strategies.
 		if (!this.host.can("complete")) {
 			this.host.setStatus("Naive compaction unavailable — waiting for live model link", {
-				aged: agedBlocks.length,
-				fullness: Math.round((view.liveTokens / view.budget) * 100),
+				aged: aged.length,
+				fullness: Math.round((visible / view.budget) * 100),
 			});
-			return this.summary !== null ? this.buildCommands(view) : [];
+			return this.summary !== null ? this.emitSummaryGroup(view) : [];
 		}
 		this.host.setStatus(null);
 
-		// FIX 3: Gate the launch on a stable signature of the NEWLY AGED set being attempted
-		// (not the full aged set). This prevents:
-		//   - Re-launching after rejection on the same newly-aged set (unchanged → same key).
-		//   - Re-launching when the aged set SHRINKS (e.g. human pins old block) — a shrink
-		//     does NOT change newlyAged ids, so the key is unchanged → no wasteful re-launch.
-		// A genuinely new aged block changes newlyAged → new key → retry is allowed.
-		const attemptKey = [...newlyAged.map((b) => b.id)].sort().join("\0");
+		// Gate the launch on a stable signature of the NEWLY AGED set being attempted
+		// (not the full aged set). This prevents re-launching after a rejection on the same
+		// newly-aged set, and re-launching when the aged set merely SHRINKS (a shrink does
+		// not change newlyAged ids). A genuinely new aged block changes newlyAged → new key
+		// → retry is allowed.
+		const attemptKey = newlyAged.map((b) => b.id).sort().join("\0");
 		if (attemptKey === this.lastAttemptKey) {
 			// Same newly-aged set as the last (failed) attempt — hold current state.
-			return this.summary !== null ? this.buildCommands(view) : [];
+			return this.summary !== null ? this.emitSummaryGroup(view) : [];
 		}
 
-		// LAUNCH a background completion. Snapshot the aged ids NOW so the
-		// async resolve handler uses the state it summarized, not a later view.
-		this.launchCompletion(agedBlocks, newlyAged, attemptKey);
+		// LAUNCH a background completion. Snapshot the aged ids NOW so the async resolve
+		// handler commits the summary against exactly the blocks it summarized, regardless of
+		// what the view looks like when it resolves.
+		this.launchCompletion(aged, newlyAged, attemptKey);
 
-		// Hold while the completion is in-flight: re-emit via buildCommands(view), which returns
-		// the existing summary's commands if one is already applied, or null on the very first
-		// trip (no prior summary yet — the ONE correct use of null: genuinely still thinking,
-		// nothing applied). Either way the in-flight completion is not relaunched.
-		return this.buildCommands(view);
+		// Hold while the completion is in-flight: re-emit the existing summary group if one
+		// is already applied, or null on the very first trip (no prior summary yet — the ONE
+		// correct use of null: genuinely still thinking, nothing applied).
+		return this.emitSummaryGroup(view);
 	}
 
 	// ── helpers ───────────────────────────────────────────────────────────────
 
 	/**
-	 * Build and return the current desired command set, VALIDATED against the live view.
+	 * The aged region: every block older than the protected working tail that is not
+	 * human-held and not already inside a group. All kinds included (the single summary
+	 * group swallows the whole region; the host pair-balances tool calls/results).
+	 */
+	private agedRegion(view: ConductorView): ViewBlock[] {
+		const aged: ViewBlock[] = [];
+		for (let i = 0; i < view.protectedFromIndex && i < view.blocks.length; i++) {
+			const b = view.blocks[i];
+			if (!b.held && !b.grouped) aged.push(b);
+		}
+		return aged;
+	}
+
+	/**
+	 * Emit the summary as `group` command(s) (digest = summary) covering the compacted
+	 * survivors in the aged region. Mirrors sliding-window's `emitRuns`, but with the LLM
+	 * summary as the digest instead of `null` (drop).
 	 *
-	 * FIX 1 (DATA-LOSS BLOCKER): the prior implementation re-emitted commands from stale
-	 * cached instance state (`headId`, `compactedIds`) without checking whether those ids
-	 * still exist in the current view. If the head block vanished (resync, truncation), the
-	 * head replace was clamped/skipped — but the empty replaces for other compacted ids were
-	 * still applied VERBATIM, destroying content with no recovery path.
+	 * Re-derived from the LIVE view on every call (FIX for the data-loss class of bug):
+	 *   - A survivor is a block in `compactedIds` that is still in the aged prefix and not
+	 *     held / not grouped. (Protected blocks are outside the prefix by definition.)
+	 *   - If no survivors → `[]` (clear to raw; lossless — the host resets all blocks to
+	 *     full live content this pass).
+	 *   - Otherwise emit one `group(first, last, digest)` per MAXIMAL CONTIGUOUS run of
+	 *     survivors, walking the FULL aged prefix (including held/grouped blocks) so a
+	 *     block the human holds SPLITS the run rather than being spanned. Under
+	 *     `human-steering` the aged region is contiguous, so there is exactly ONE run →
+	 *     one summary tile (the design intent). A pre-existing held/grouped block splitting
+	 *     the region yields one group per side, each carrying the summary digest — every
+	 *     survivor stays summarized, none is dropped. (Spanning the held block instead would
+	 *     make the host clamp the whole group `human-override`, dropping the summary for
+	 *     ALL survivors that pass.)
 	 *
-	 * This method re-derives the command set from the LIVE view on every call:
-	 *   1. Compute SURVIVING compacted blocks = ids in compactedIds that still exist in
-	 *      view.blocks AND are not held, not grouped, not protected.
-	 *   2. Keep only host-replaceable survivors (`text`, `thinking`, `tool_result`) as command
-	 *      targets. `user`/`tool_call` blocks stay live: the host would clamp them with
-	 *      `not-foldable`, so using one as the summary head would discard the summary while
-	 *      still allowing other empty replaces to apply.
-	 *   3. Choose head = replaceable survivor with the LOWEST order (oldest surviving). If the
-	 *      original head vanished or is non-foldable, the summary re-homes to the next oldest
-	 *      replaceable survivor.
-	 *   4. If NO replaceable survivor qualifies as head → return [] (clear to raw). No empties emitted,
-	 *      no data loss — the host resets all blocks to full live content this pass.
-	 *   5. Otherwise return [ replace(head, summary), ...replace(other, "") per other replaceable survivor ].
-	 *
-	 * INVARIANT: this method NEVER returns an array containing replace(x,"") unless it also
-	 * contains replace(head, summary) on a host-replaceable block present in the current view.
+	 * The host snaps each run outward to whole messages and refuses one whose snapped
+	 * range reaches into the protected tail (`invalid-group` clamp) — the same boundary
+	 * straggler caveat sliding-window documents. Refused runs' blocks simply stay live
+	 * that pass (no data loss) and rejoin when the boundary clears.
 	 *
 	 * Returns:
-	 *   - null  → no summary yet; used ONLY while a first-trip completion is in-flight
-	 *             (the ONE correct use of null: still thinking, nothing applied yet).
-	 *   - []    → no surviving compacted blocks to re-apply (clear to raw; lossless).
-	 *   - [...] → head replace (summary text) + one empty replace per other surviving id.
+	 *   - null  → no summary yet (used ONLY while a first-trip completion is in-flight).
+	 *   - []    → no surviving compacted blocks to cover (clear to raw; lossless).
+	 *   - [...] → one `group` command per contiguous survivor run, digest = summary.
 	 */
-	private buildCommands(view: ConductorView): Command[] | null {
+	private emitSummaryGroup(view: ConductorView): Command[] | null {
 		if (this.summary === null) return null;
 
-		// Build an id→block lookup for the current view.
-		const blockById = new Map<string, ViewBlock>(view.blocks.map((b) => [b.id, b]));
-
-		// Compute surviving compacted blocks: present in view, not held/grouped/protected.
-		// (Protected blocks in compactedIds means the summary grew over them — the host
-		// would clamp a replace on them with reason "protected", which is just log spam.
-		// Exclude them here so we never emit stale commands that generate clamp noise.)
-		const survivors: ViewBlock[] = [];
-		for (const id of this.compactedIds) {
-			const b = blockById.get(id);
-			if (b && !b.held && !b.grouped && !b.protected) {
-				survivors.push(b);
+		const cmds: Command[] = [];
+		let runStart = -1;
+		let runEnd = -1;
+		let survivorCount = 0;
+		const flush = (): void => {
+			if (runStart === -1) return;
+			cmds.push({
+				kind: "group",
+				ids: [view.blocks[runStart].id, view.blocks[runEnd].id],
+				digest: this.summary!,
+			});
+			runStart = -1;
+			runEnd = -1;
+		};
+		const pfi = Math.min(view.protectedFromIndex, view.blocks.length);
+		for (let i = 0; i < pfi; i++) {
+			const b = view.blocks[i];
+			if (this.compactedIds.has(b.id) && !b.held && !b.grouped) {
+				survivorCount++;
+				if (runStart === -1) runStart = i;
+				runEnd = i;
+			} else {
+				flush();
 			}
 		}
-
-		// No survivors → the entire compacted set vanished/is protected/grouped. Clear to raw.
-		// Returning [] is LOSSLESS: the host resets all blocks to full live content this pass.
-		// The summary text is preserved in this.summary in case a future view re-exposes blocks.
-		if (survivors.length === 0) return [];
-
-		// Only replace kinds that the host can represent on the wire. If the oldest survivor is
-		// a `user` block, replacing it would be clamped `not-foldable`; any empty replaces for
-		// the other survivors would still apply, dropping the summary. Re-home the head to the
-		// oldest replaceable survivor instead.
-		const replaceable = survivors.filter(isReplaceableByHost);
-		if (replaceable.length === 0) return [];
-
-		// Choose head = replaceable block with the lowest order (oldest valid target).
-		// sort() is non-mutating-friendly since replaceable is a local array.
-		replaceable.sort((a, b) => a.order - b.order);
-		const head = replaceable[0];
-
-		const cmds: Command[] = [];
-
-		// The head block carries the summary text.
-		cmds.push({ kind: "replace", id: head.id, content: this.summary });
-
-		// Every other replaceable surviving compacted block is emptied — it stays structurally in
-		// place (tool-call/result pairing is intact) but contributes (almost) nothing
-		// to the token count.
-		// Non-foldable survivors (user/tool_call) are deliberately left live.
-		for (const b of replaceable) {
-			if (b.id === head.id) continue;
-			cmds.push({ kind: "replace", id: b.id, content: "" });
-		}
-
+		flush();
+		if (survivorCount === 0) return [];
 		return cmds;
+	}
+
+	/**
+	 * The token cost of the current summary, via the host's tokenizer when available,
+	 * else a length/4 estimate. Used only to compute the VISIBLE window for the trigger.
+	 */
+	private summaryTokenCost(): number {
+		if (this.summary === null) return 0;
+		if (this.host && this.host.can("countTokens")) return this.host.countTokens(this.summary);
+		return Math.ceil(this.summary.length / 4);
 	}
 
 	/**
@@ -367,7 +423,7 @@ export class NaiveCompactionConductor implements Conductor {
 		if (this.inflight !== null) return;
 
 		// Snapshot the ids and count at LAUNCH TIME. The resolve handler closes over these
-		// so it applies the summary to exactly the blocks it summarized, regardless of
+		// so it commits the summary against exactly the blocks it summarized, regardless of
 		// what the view looks like when it resolves.
 		const launchedAgedIds = new Set(agedBlocks.map((b) => b.id));
 		const count = agedBlocks.length;
@@ -377,8 +433,6 @@ export class NaiveCompactionConductor implements Conductor {
 
 		// Record the attempt key (keyed on newlyAged ids) so that a rejected completion
 		// does NOT immediately re-launch for the same newly-aged set on the next conduct() tick.
-		// This key is NOT cleared on rejection — an unchanged newly-aged set stays suppressed.
-		// It IS superseded automatically when newlyAged grows (new key ≠ old key).
 		this.lastAttemptKey = attemptKey;
 
 		const controller = new AbortController();
@@ -391,9 +445,17 @@ export class NaiveCompactionConductor implements Conductor {
 			signal: controller.signal,
 		}).then(
 			(result) => {
+				// Stale-completion guard: if this conductor was detached (or swapped and
+				// re-attached, launching a new controller) while this promise was outstanding,
+				// `this.inflight` no longer points at OUR controller. Bail without touching
+				// `summary`/`compactedIds`/`inflight` — a stale result must never overwrite the
+				// new session's state, and clearing `inflight` here would clobber a fresh
+				// in-flight completion. (The host is contractually expected to reject on abort,
+				// but a completer that resolves regardless must still be safe.)
+				if (this.inflight !== controller) return;
 				const text = result.text.trim();
 				if (!text) {
-					// Empty output would replace the aged context with only the boilerplate header.
+					// Empty output would collapse the aged context behind a header-only summary.
 					// Treat it as a failed attempt: preserve the prior summary/state and wait for
 					// genuinely new aged content before retrying this same key.
 					this.inflight = null;
@@ -402,29 +464,28 @@ export class NaiveCompactionConductor implements Conductor {
 					});
 					return;
 				}
-				// Success: commit the new summary and command state.
-				// NOTE: we do NOT store a headId — buildCommands() re-derives the head from
-				// the live view every call, so it is always valid even if blocks shift.
+				// Success: commit the new summary. The group covers `compactedIds ∩ aged` and is
+				// re-derived from the live view every pass by emitSummaryGroup, so it stays valid
+				// even if blocks shift, vanish, or re-home across the protected boundary.
 				this.inflight = null;
 				this.summary =
 					`[Compacted summary of ${count} earlier message${count === 1 ? "" : "s"}]\n\n` +
 					text;
 				this.compactedIds = launchedAgedIds;
-				// Ask the host to re-run conduct() now so the replace commands take effect
+				// Ask the host to re-run conduct() now so the summary group takes effect
 				// immediately rather than waiting for the next natural context change.
 				this.host?.requestRerun();
 			},
 			(_err) => {
+				// Stale-completion guard (see the resolve handler): a reject from a controller
+				// that is no longer current must not clear a fresh in-flight completion.
+				if (this.inflight !== controller) return;
 				// Rejected (abort, network error, unknown model, etc.): clear inflight but
 				// leave prior summary/state intact. We do NOT immediately relaunch — the
 				// lastAttemptKey guard ensures we only retry when genuinely new aged content
-				// arrives (changing the attempt key) or when the conductor is replaced on
-				// the next attach. This prevents a tight model-hammering loop on a
-				// persistent failure.
+				// arrives (changing the attempt key). This prevents a tight model-hammering
+				// loop on a persistent failure.
 				this.inflight = null;
-				// Note: if this.host is null here, detach() was called mid-flight — that
-				// is fine, the abort() in detach() will cause the reject branch, and we
-				// simply clear inflight and exit.
 			},
 		);
 	}
@@ -433,17 +494,17 @@ export class NaiveCompactionConductor implements Conductor {
 	 * Build the user-role prompt for the compaction completion.
 	 *
 	 * FIRST compaction (summary == null):
-	 *   Concatenate the text of ALL aged-region blocks, labeled by role/kind.
-	 *   Every block that has ever been aged is included verbatim.
+	 *   Concatenate the text of ALL newly-aged blocks, labeled by role/kind.
+	 *   Every block that has just aged is included verbatim (all kinds).
 	 *
 	 * RECURSIVE compaction (summary != null):
 	 *   Prepend the PRIOR SUMMARY, then append only the NEWLY AGED blocks.
 	 *   The originals already compressed into the prior summary are DELIBERATELY NOT
 	 *   re-read — this recursive amnesia is the entire point of the baseline: it
-	 *   faithfully reproduces the compounding quality loss that mainstream tools
-	 *   impose (each compaction can only see the previous summary, not the originals).
-	 *   Accordion's reversible folding does not have this problem — that is why this
-	 *   conductor exists as a foil.
+	 *   faithfully reproduces the compounding quality loss that mainstream tools impose
+	 *   (each compaction can only see the previous summary, not the originals). User
+	 *   messages fare better: they were baked verbatim into the prior summary, so they
+	 *   survive intact across compactions; only assistant reasoning degrades.
 	 */
 	private buildPrompt(newlyAged: ViewBlock[]): string {
 		const parts: string[] = [];
@@ -473,6 +534,13 @@ export class NaiveCompactionConductor implements Conductor {
 
 // ── utilities ─────────────────────────────────────────────────────────────────
 
+/** Sum the full token cost of a set of blocks. */
+function sumTokens(blocks: ViewBlock[]): number {
+	let n = 0;
+	for (const b of blocks) n += b.tokens;
+	return n;
+}
+
 /**
  * A short human-readable label for a block, used when building the compaction prompt.
  * Mirrors the role labeling convention in the Transcript view.
@@ -496,9 +564,4 @@ function blockLabel(b: ViewBlock): string {
 			return String(_never);
 		}
 	}
-}
-
-/** Block kinds the host can fold/replace as individual wire content substitutions. */
-function isReplaceableByHost(b: ViewBlock): boolean {
-	return b.kind === "text" || b.kind === "thinking" || b.kind === "tool_result";
 }
