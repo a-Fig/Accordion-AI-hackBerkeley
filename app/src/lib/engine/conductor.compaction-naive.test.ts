@@ -1,28 +1,37 @@
 /*
  * conductor.compaction-naive.test.ts — state-machine tests for NaiveCompactionConductor.
  *
- * Tests are purely unit-level: no AccordionStore, no file I/O, no real timers.
- * Promises are resolved/rejected manually by calling the captured resolve/reject
- * closures so every test is fully deterministic.
+ * The redesigned conductor collapses the aged region into ONE `group` command whose
+ * `digest` is an LLM-generated summary (sliding-window's shape, with a summary digest
+ * instead of `null`). These tests pin that behaviour.
+ *
+ * Tests are purely unit-level: no AccordionStore, no file I/O, no real timers (one
+ * store-level integration block at the end). Promises are resolved/rejected manually by
+ * calling the captured resolve/reject closures so every test is fully deterministic.
  *
  * Test plan:
- *   1. Under threshold, no aged region → conduct returns []; complete never called.
- *   2. Over threshold with aged region and can("complete")===true →
- *        first conduct launches exactly one complete and returns null (hold);
- *        after resolve + requestRerun, next conduct returns replace commands.
- *   3. Idempotent re-emit: same replace set returned without calling complete again.
- *   4. Recursive/amnesiac: second compaction prompt contains prior summary + newly
- *      aged text but NOT the text of the first batch's original blocks.
- *   5. No double-launch: while complete is pending, further conducts do not re-call it.
- *   6. Unavailable path: can("complete")===false → preserve current state; no complete.
- *   7. detach() aborts an in-flight completion (AbortSignal becomes aborted).
- *   8. Summary replace content carries no {# FOLDED tag.
- *   9. Held / grouped blocks are excluded from the aged region.
- *  10. Threshold boundary (95%).
- *  11. DATA-LOSS REGRESSION: head vanishes / all compacted ids vanish → no lone empties.
- *  12. HEAD GROUPED/PROTECTED: re-homing when head is grouped or protected.
- *  13. TOOL_CALL EXCLUSION: tool_call blocks are never a replace target.
- *  14. ATTEMPTKEY ON NEWLYAGED: shrink of aged set must not relaunch; new block must.
+ *   1. Under threshold / no aged region → []; complete never called.
+ *   2. First compaction: launch → null → resolve → ONE group(digest: summary) command.
+ *   3. Idempotent re-emit: same group returned without calling complete again.
+ *   4. Hysteresis: after a compaction, a new aged block does NOT re-trigger while the
+ *      VISIBLE window is still below 90%; it re-triggers once visible refills to 90%.
+ *   5. Recursive/amnesiac: second prompt = prior summary + newly-aged text, NOT the
+ *      originals already compressed; the group covers ALL compacted blocks.
+ *   6. No double-launch while a completion is in-flight.
+ *   7. Unavailable path: can("complete")===false → preserve current state; no complete.
+ *   8. detach() aborts an in-flight completion; re-attach resets state.
+ *   9. Prompt construction (first + recursive); system prompt bakes user messages verbatim.
+ *  10. Held / grouped blocks are excluded from the aged region.
+ *  11. Threshold boundary (90% of the VISIBLE window).
+ *  12. All kinds swallowed: user, tool_call, tool_result, thinking, text all appear in the
+ *      prompt AND are covered by the single group (tool_call no longer excluded).
+ *  13. Empty completion text is a failure: prior state preserved, no header-only group.
+ *  14. attemptKey on newlyAged: shrink of aged set must not relaunch; a new block must.
+ *  15. Degrade must not clobber an existing LLM summary (re-emit group; relaunch on recovery).
+ *  16. DATA-LOSS-CLASS regression: vanished compacted blocks → group covers the survivors;
+ *      all vanished → [] (no lone empties possible with the group shape).
+ *  17. AccordionStore integration: the summary lands as a real folded group; user blocks are
+ *      swallowed into the group (not left live); tool_call/result pair-balanced.
  */
 
 import { describe, it, expect } from "vitest";
@@ -50,6 +59,7 @@ function vb(
 		grouped?: boolean;
 		protected?: boolean;
 		order?: number;
+		toolName?: string;
 	} = {},
 ): ViewBlock {
 	return {
@@ -64,6 +74,7 @@ function vb(
 		protected: opts.protected ?? false,
 		grouped: opts.grouped ?? false,
 		text: opts.text ?? `content of ${id}`,
+		toolName: opts.toolName,
 	};
 }
 
@@ -73,7 +84,7 @@ function vb(
  * @param agedBlocks  - blocks that are OLDER than the protected tail (i < protectedFromIndex)
  * @param tailBlocks  - blocks IN the protected tail (i >= protectedFromIndex)
  * @param budget      - token budget
- * @param liveTokens  - current live token count
+ * @param liveTokens  - current RAW live token count (the host clears conductor folds first)
  */
 function makeView(
 	agedBlocks: ViewBlock[],
@@ -124,7 +135,7 @@ function makeStore(blocks: Block[]): AccordionStore {
 	return new AccordionStore(parsed);
 }
 
-async function flushMicrotasks(times = 4): Promise<void> {
+async function flushMicrotasks(times = 6): Promise<void> {
 	for (let i = 0; i < times; i++) await Promise.resolve();
 }
 
@@ -213,15 +224,14 @@ class MockHost implements ConductorHost {
 	}
 }
 
-// ── 1. Under threshold, no aged region → [] and no complete calls ─────────────
+// ── 1. Under threshold / no aged region → [] and no complete calls ────────────
 
 describe("NaiveCompactionConductor — under threshold / no aged region", () => {
-	it("returns [] when liveTokens < 95% budget with no aged blocks", () => {
+	it("returns [] when liveTokens < 90% budget with no aged blocks", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
 
-		// No aged blocks, well under budget.
 		const view = makeView([], [vb("tail0")], 100_000, 10_000);
 		const result = c.conduct(view);
 
@@ -229,28 +239,24 @@ describe("NaiveCompactionConductor — under threshold / no aged region", () => 
 		expect(host.completeCalls).toHaveLength(0);
 	});
 
-	it("returns [] when there are aged blocks but liveTokens is below threshold (no prior summary)", () => {
+	it("returns [] when aged blocks exist but the visible window is below 90% (no prior summary)", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
 
-		// liveTokens = 94900, budget = 100000 → 94.9% < 95% → no trigger.
-		// With aged blocks present but no prior summary, needSummary=false — the conductor
-		// has a DEFINITE synchronous answer (nothing to compact). Must return [] (clear to
-		// raw), NOT null (which would mean "still thinking / in-flight"). FIX 1.
-		const view = makeView([vb("a0")], [vb("tail0")], 100_000, 94_900);
+		// liveTokens = 89999 < 90000 (90% of 100k). No summary → visible = liveTokens. No trigger.
+		const view = makeView([vb("a0")], [vb("tail0")], 100_000, 89_999);
 		const result = c.conduct(view);
 
 		expect(result).toEqual([]);
 		expect(host.completeCalls).toHaveLength(0);
 	});
 
-	it("returns [] when aged blocks exist but liveTokens is well under threshold (no prior summary)", () => {
+	it("returns [] with several aged blocks well under threshold (no prior summary)", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
 
-		// Same as above — conductor has a definite "nothing to compact" answer → []. FIX 1.
 		const aged = [vb("a0"), vb("a1")];
 		const view = makeView(aged, [vb("tail0")], 100_000, 50_000);
 		const result = c.conduct(view);
@@ -261,7 +267,6 @@ describe("NaiveCompactionConductor — under threshold / no aged region", () => 
 
 	it("returns null when host is not provided (no attach call)", () => {
 		const c = new NaiveCompactionConductor();
-		// No attach() call → host is null → must return null per implementation
 		const view = makeView([vb("a0")], [vb("tail0")], 100_000, 96_000);
 		const result = c.conduct(view);
 
@@ -269,7 +274,7 @@ describe("NaiveCompactionConductor — under threshold / no aged region", () => 
 	});
 });
 
-// ── 2. First compaction: launch → null → resolve → replace commands ───────────
+// ── 2. First compaction: launch → null → resolve → ONE group command ──────────
 
 describe("NaiveCompactionConductor — first compaction cycle", () => {
 	it("over threshold with aged blocks: first conduct launches exactly one complete and returns null", () => {
@@ -278,7 +283,7 @@ describe("NaiveCompactionConductor — first compaction cycle", () => {
 		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1"), vb("a2")];
-		// liveTokens = 96000 ≥ 0.95 * 100000
+		// liveTokens = 96000 >= 90000 (90% of 100k). No summary → visible = 96000.
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
 		const result = c.conduct(view);
 
@@ -288,7 +293,7 @@ describe("NaiveCompactionConductor — first compaction cycle", () => {
 		expect(host.pending).toHaveLength(1);
 	});
 
-	it("after completion resolves and requestRerun fires, next conduct returns replace commands", async () => {
+	it("after completion resolves and requestRerun fires, next conduct returns ONE group command covering all aged blocks", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
@@ -296,51 +301,44 @@ describe("NaiveCompactionConductor — first compaction cycle", () => {
 		const aged = [vb("a0", { order: 0 }), vb("a1", { order: 1 }), vb("a2", { order: 2 })];
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
 
-		// First conduct kicks off the completion
 		c.conduct(view);
 		expect(host.pending).toHaveLength(1);
 
-		// Resolve the completion
 		let conductCalledAfterRequestRerun = false;
 		host.onRequestRerun = () => {
 			conductCalledAfterRequestRerun = true;
 		};
 		host.resolveNext("Summary text from the model.");
 
-		// Wait for the microtask (promise resolution)
 		await Promise.resolve();
 
 		expect(conductCalledAfterRequestRerun).toBe(true);
 		expect(host.requestRerunCalls).toBe(1);
 
-		// Now conduct again — should return replace commands
+		// Now conduct again — should return exactly ONE group command.
 		const result = c.conduct(view);
 
 		expect(result).not.toBeNull();
 		expect(Array.isArray(result)).toBe(true);
 		const cmds = result!;
 
-		// Must have replace commands: one head + N-1 empties
-		const replaces = cmds.filter((cmd) => cmd.kind === "replace");
-		expect(replaces.length).toBe(3); // 3 aged blocks → 3 replace commands
+		// Exactly one command, and it is a group (no replace commands at all).
+		expect(cmds).toHaveLength(1);
+		const group = cmds[0];
+		expect(group.kind).toBe("group");
 
-		// Head block (a0, the first/oldest aged block) carries the summary text
-		const head = replaces.find((cmd) => cmd.kind === "replace" && (cmd as { id: string }).id === "a0");
-		expect(head).toBeDefined();
-		// Summary includes a preamble and the model text
-		expect((head as { content: string }).content).toContain("Summary text from the model.");
+		// The group spans the first to the last aged block (host snaps outward to whole
+		// messages from these endpoints).
+		const g = group as { ids: string[]; digest: string };
+		expect(g.ids).toEqual(["a0", "a2"]);
 
-		// Other blocks are emptied
-		const emptied = replaces.filter(
-			(cmd) => cmd.kind === "replace" && (cmd as { id: string }).id !== "a0",
-		);
-		expect(emptied).toHaveLength(2);
-		for (const e of emptied) {
-			expect((e as { content: string }).content).toBe("");
-		}
+		// The digest is the summary (preamble + model text). No {# FOLDED} tag.
+		expect(g.digest).toContain("Summary text from the model.");
+		expect(g.digest).not.toMatch(/\{#\w+\s+FOLDED\}/);
+		expect(g.digest).toContain("3 earlier message");
 	});
 
-	it("summary replace content carries no {# FOLDED tag (irreversible, no recovery handle)", async () => {
+	it("no replace commands are ever emitted (the group is the sole command shape)", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
@@ -354,63 +352,18 @@ describe("NaiveCompactionConductor — first compaction cycle", () => {
 
 		const result = c.conduct(view);
 		expect(result).not.toBeNull();
-
 		for (const cmd of result!) {
-			if (cmd.kind === "replace") {
-				const content = (cmd as { content: string }).content;
-				if (content) {
-					// The head block's summary must NOT contain a {# FOLDED tag
-					expect(content).not.toMatch(/\{#\w+\s+FOLDED\}/);
-					expect(content).not.toContain("{#");
-				}
-			}
+			expect(cmd.kind).not.toBe("replace");
+			expect(cmd.kind).not.toBe("fold");
 		}
-	});
-
-	it("summary preamble includes the count of compacted messages", async () => {
-		const c = new NaiveCompactionConductor();
-		const host = new MockHost();
-		c.attach(host);
-
-		const aged = [vb("a0"), vb("a1"), vb("a2"), vb("a3")];
-		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
-
-		c.conduct(view);
-		host.resolveNext("Model output.");
-		await Promise.resolve();
-
-		const result = c.conduct(view);
-		const head = result!.find(
-			(cmd) => cmd.kind === "replace" && (cmd as { id: string }).id === "a0",
-		) as { content: string } | undefined;
-
-		expect(head).toBeDefined();
-		expect(head!.content).toContain("4 earlier message");
-	});
-
-	it("empty completion text is treated as failure and does not apply header-only compaction", async () => {
-		const c = new NaiveCompactionConductor();
-		const host = new MockHost();
-		c.attach(host);
-
-		const aged = [vb("a0"), vb("a1")];
-		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
-
-		expect(c.conduct(view)).toBeNull();
-		host.resolveNext("   \n\t  ");
-		await Promise.resolve();
-		expect(host.statusText).toContain("empty summary");
-
-		const result = c.conduct(view);
-		expect(result).toEqual([]);
-		expect(host.requestRerunCalls).toBe(0);
+		expect(result!.every((cmd) => cmd.kind === "group")).toBe(true);
 	});
 });
 
 // ── 3. Idempotent re-emit ─────────────────────────────────────────────────────
 
 describe("NaiveCompactionConductor — idempotent re-emit", () => {
-	it("repeated conduct calls after summary exists return same replace set without calling complete again", async () => {
+	it("repeated conduct calls after a summary exists return the same group without calling complete again", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
@@ -422,31 +375,28 @@ describe("NaiveCompactionConductor — idempotent re-emit", () => {
 		host.resolveNext("The summary.");
 		await Promise.resolve();
 
-		// First post-completion conduct
 		const result1 = c.conduct(view);
-		// Second post-completion conduct (still over threshold)
 		const result2 = c.conduct(view);
-		// Third
 		const result3 = c.conduct(view);
 
 		expect(host.completeCalls).toHaveLength(1); // complete called EXACTLY once total
 
-		// All three should return the same replace commands
+		// All three return the same single group command.
 		expect(result1).not.toBeNull();
 		expect(result2).not.toBeNull();
 		expect(result3).not.toBeNull();
-		expect(result1!.length).toBe(result2!.length);
 		expect(JSON.stringify(result1)).toBe(JSON.stringify(result2));
 		expect(JSON.stringify(result2)).toBe(JSON.stringify(result3));
+		expect(result1!).toHaveLength(1);
+		expect(result1![0].kind).toBe("group");
 	});
 
-	it("returns same commands even when liveTokens drops below threshold (once compacted, stays compacted)", async () => {
+	it("returns the same group even when liveTokens drops below threshold (once compacted, stays compacted)", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
 
 		const aged = [vb("a0"), vb("a1")];
-		// Over threshold for first compaction
 		const view1 = makeView(aged, [vb("tail0")], 100_000, 96_000);
 
 		c.conduct(view1);
@@ -454,18 +404,114 @@ describe("NaiveCompactionConductor — idempotent re-emit", () => {
 		await Promise.resolve();
 		c.conduct(view1); // commit the summary
 
-		// Now simulate liveTokens dropping below threshold
+		// Now simulate liveTokens dropping below threshold.
 		const view2 = makeView(aged, [vb("tail0")], 100_000, 50_000);
 		const result = c.conduct(view2);
 
-		// Still re-emits the replace commands (they are the committed state)
 		expect(result).not.toBeNull();
-		expect(result!.some((cmd) => cmd.kind === "replace")).toBe(true);
+		expect(result!).toHaveLength(1);
+		expect(result![0].kind).toBe("group");
+		expect(host.completeCalls).toHaveLength(1);
+	});
+
+	it("re-emits the group even while still over threshold, as long as nothing new has aged in", async () => {
+		const c = new NaiveCompactionConductor();
+		const host = new MockHost();
+		c.attach(host);
+
+		// Small blocks: after compaction the saving is tiny, so the visible window stays
+		// above 90%. But newlyAged is empty → the conductor HOLDS (no relaunch).
+		const aged = [vb("a0"), vb("a1")];
+		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
+
+		c.conduct(view);
+		host.resolveNext("Summary.");
+		await Promise.resolve();
+		c.conduct(view); // commit
+
+		// Still over threshold, same aged set (nothing new) → re-emit, no relaunch.
+		const result = c.conduct(view);
+		expect(result).not.toBeNull();
+		expect(result![0].kind).toBe("group");
 		expect(host.completeCalls).toHaveLength(1);
 	});
 });
 
-// ── 4. Recursive / amnesiac prompt ───────────────────────────────────────────
+// ── 4. Hysteresis: visible-window band ────────────────────────────────────────
+
+describe("NaiveCompactionConductor — hysteresis (visible-window band)", () => {
+	it("after a compaction with large saving, a new aged block does NOT re-trigger while visible < 90%", async () => {
+		const c = new NaiveCompactionConductor();
+		const host = new MockHost();
+		c.attach(host);
+
+		// Large aged blocks so the summary saving is significant.
+		const a0 = vb("a0", { tokens: 40_000, order: 0 });
+		const a1 = vb("a1", { tokens: 40_000, order: 1 });
+		const tail0 = vb("tail0", { tokens: 4_000 });
+
+		// liveTokens = 96000 >= 90000 → first compaction triggers.
+		const view1 = makeView([a0, a1], [tail0], 100_000, 96_000);
+		c.conduct(view1);
+		host.resolveNext("FIRST SUMMARY");
+		await Promise.resolve();
+		c.conduct(view1); // commit
+
+		// After compaction: survivors = [a0, a1] (80k tokens), summary cost is tiny.
+		// savedTokens ≈ 80k → visible ≈ 96000 - 80000 = 16000, well below 90000.
+		// A new block b0 ages in (newlyAged = [b0]) but visible is still below 90% → NO relaunch.
+		const b0 = vb("b0", { tokens: 5_000, order: 2 });
+		const view2 = makeView([a0, a1, b0], [tail0], 100_000, 101_000);
+		const result = c.conduct(view2);
+
+		// No second completion launched.
+		expect(host.completeCalls).toHaveLength(1);
+		// The conductor re-emits the existing summary group (covers a0, a1; b0 stays live).
+		expect(result).not.toBeNull();
+		const groups = result!.filter((cmd) => cmd.kind === "group") as Array<{
+			ids: string[];
+			digest: string;
+		}>;
+		expect(groups).toHaveLength(1);
+		expect(groups[0].ids).toEqual(["a0", "a1"]);
+		expect(groups[0].digest).toContain("FIRST SUMMARY");
+	});
+
+	it("re-triggers once the visible window refills to 90% (new aged content pushes it over)", async () => {
+		const c = new NaiveCompactionConductor();
+		const host = new MockHost();
+		c.attach(host);
+
+		const a0 = vb("a0", { tokens: 40_000, order: 0 });
+		const a1 = vb("a1", { tokens: 40_000, order: 1 });
+		const tail0 = vb("tail0", { tokens: 4_000 });
+
+		const view1 = makeView([a0, a1], [tail0], 100_000, 96_000);
+		c.conduct(view1);
+		host.resolveNext("FIRST SUMMARY");
+		await Promise.resolve();
+		c.conduct(view1); // commit; visible ≈ 16000
+
+		// New block b0 aged in, but visible still below 90%.
+		const b0 = vb("b0", { tokens: 5_000, order: 2 });
+		const view2 = makeView([a0, a1, b0], [tail0], 100_000, 101_000);
+		c.conduct(view2); // no relaunch
+		expect(host.completeCalls).toHaveLength(1);
+
+		// Now grow the raw window until visible >= 90000.
+		// visible = liveTokens - savedTokens(≈80000) >= 90000 → liveTokens >= 170000.
+		const view3 = makeView([a0, a1, b0], [tail0], 100_000, 171_000);
+		c.conduct(view3); // visible ≈ 91000 >= 90000, newlyAged=[b0] → relaunch
+
+		expect(host.completeCalls).toHaveLength(2);
+		const secondPrompt = host.completeCalls[1].prompt;
+		// Amnesia: the second prompt reads the prior summary + b0, NOT a0/a1 originals.
+		expect(secondPrompt).toContain("FIRST SUMMARY");
+		expect(secondPrompt).toContain("content of b0");
+	});
+});
+
+// ── 5. Recursive / amnesiac prompt ───────────────────────────────────────────
 
 describe("NaiveCompactionConductor — recursive compaction (amnesia)", () => {
 	it("second compaction prompt contains prior summary and newly aged text but NOT original first-batch text", async () => {
@@ -473,7 +519,6 @@ describe("NaiveCompactionConductor — recursive compaction (amnesia)", () => {
 		const host = new MockHost();
 		c.attach(host);
 
-		// First batch: a0, a1 are aged; tail0 is protected
 		const a0 = vb("a0", { text: "ORIGINAL BLOCK A0 CONTENT" });
 		const a1 = vb("a1", { text: "ORIGINAL BLOCK A1 CONTENT" });
 		const tail0 = vb("tail0", { protected: true });
@@ -484,28 +529,22 @@ describe("NaiveCompactionConductor — recursive compaction (amnesia)", () => {
 		await Promise.resolve();
 		c.conduct(view1); // commit
 
-		// Now a new block (b0) has aged into the old region
+		// b0 ages in; small blocks so visible stays over 90% → relaunch.
 		const b0 = vb("b0", { text: "NEW BLOCK B0 CONTENT" });
-		// Both a0/a1 are now compactedIds; b0 is newly aged
-		// Push liveTokens back over threshold
 		const view2 = makeView([a0, a1, b0], [tail0], 100_000, 96_000);
 		c.conduct(view2);
 
-		// Verify second complete was launched
 		expect(host.completeCalls).toHaveLength(2);
-
 		const secondPrompt = host.completeCalls[1].prompt;
 
-		// MUST contain the prior summary text
 		expect(secondPrompt).toContain("FIRST SUMMARY OUTPUT");
-		// MUST contain the newly aged block's text
 		expect(secondPrompt).toContain("NEW BLOCK B0 CONTENT");
-		// MUST NOT contain the original first-batch block text (amnesia)
+		// Amnesia: the originals already compressed are NOT re-read.
 		expect(secondPrompt).not.toContain("ORIGINAL BLOCK A0 CONTENT");
 		expect(secondPrompt).not.toContain("ORIGINAL BLOCK A1 CONTENT");
 	});
 
-	it("second compaction uses prior summary section header and newly-added section header", async () => {
+	it("second compaction uses the prior-summary and newly-added section headers", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
@@ -529,7 +568,7 @@ describe("NaiveCompactionConductor — recursive compaction (amnesia)", () => {
 		expect(prompt2).toContain("NEWLY ADDED MESSAGES");
 	});
 
-	it("second compaction's replace commands cover ALL aged blocks (a0+a1+b0), not just b0", async () => {
+	it("after the second compaction resolves, the group covers ALL aged blocks (a0+a1+b0)", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
@@ -551,17 +590,16 @@ describe("NaiveCompactionConductor — recursive compaction (amnesia)", () => {
 		const result = c.conduct(view2);
 		expect(result).not.toBeNull();
 
-		const replaces = result!.filter((cmd) => cmd.kind === "replace");
-		const ids = replaces.map((cmd) => (cmd as { id: string }).id);
-		// All three aged block ids should be covered
-		expect(ids).toContain("a0");
-		expect(ids).toContain("a1");
-		expect(ids).toContain("b0");
-		expect(replaces).toHaveLength(3);
+		// ONE group spanning a0..b0, digest = Summary 2.
+		expect(result!).toHaveLength(1);
+		const g = result![0] as { kind: string; ids: string[]; digest: string };
+		expect(g.kind).toBe("group");
+		expect(g.ids).toEqual(["a0", "b0"]);
+		expect(g.digest).toContain("Summary 2");
 	});
 });
 
-// ── 5. No double-launch ───────────────────────────────────────────────────────
+// ── 6. No double-launch while in-flight ───────────────────────────────────────
 
 describe("NaiveCompactionConductor — no double-launch while in-flight", () => {
 	it("while a complete is pending, further conduct calls do not call complete again", () => {
@@ -580,7 +618,7 @@ describe("NaiveCompactionConductor — no double-launch while in-flight", () => 
 		expect(host.pending).toHaveLength(1);
 	});
 
-	it("all conduct calls while in-flight return null (hold state)", () => {
+	it("the first conduct returns null (no summary yet); later conducts while in-flight also return null", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
@@ -597,9 +635,7 @@ describe("NaiveCompactionConductor — no double-launch while in-flight", () => 
 		expect(r3).toBeNull();
 	});
 
-	// ── FIX 2 regression: rejection must NOT cause re-launch on unchanged aged set ──
-
-	it("after rejection, does NOT re-launch on the next conduct with the SAME aged set", async () => {
+	it("after rejection, does NOT re-launch on the next conduct with the SAME newly-aged set", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
@@ -611,14 +647,14 @@ describe("NaiveCompactionConductor — no double-launch while in-flight", () => 
 		host.rejectNext(new Error("network error"));
 		await Promise.resolve();
 
-		// Same aged set → attempt key unchanged → must NOT relaunch. FIX 2.
+		// Same aged set → newlyAged unchanged → attempt key unchanged → no relaunch.
 		const result = c.conduct(view);
-		expect(host.completeCalls).toHaveLength(1); // still only 1 complete call
-		// Returns [] (clear to raw) — definite "nothing applied" answer, not null.
+		expect(host.completeCalls).toHaveLength(1);
+		// No summary yet → definite "nothing applied" answer → [] (not null).
 		expect(result).toEqual([]);
 	});
 
-	it("after rejection, returns [] (not null) on subsequent conduct with same aged set", async () => {
+	it("after rejection, returns [] (not null) on subsequent conducts with the same aged set", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
@@ -630,14 +666,11 @@ describe("NaiveCompactionConductor — no double-launch while in-flight", () => 
 		host.rejectNext(new Error("error"));
 		await Promise.resolve();
 
-		// Multiple subsequent conduct calls with the same view — none should relaunch.
 		const r1 = c.conduct(view);
 		const r2 = c.conduct(view);
-		const r3 = c.conduct(view);
 		expect(host.completeCalls).toHaveLength(1);
 		expect(r1).toEqual([]);
 		expect(r2).toEqual([]);
-		expect(r3).toEqual([]);
 	});
 
 	it("after rejection, DOES re-launch when a NEW aged block arrives (attempt key changes)", async () => {
@@ -652,16 +685,15 @@ describe("NaiveCompactionConductor — no double-launch while in-flight", () => 
 		host.rejectNext(new Error("error"));
 		await Promise.resolve();
 
-		// Add a genuinely new aged block → attempt key changes → retry is allowed. FIX 2.
 		const b0 = vb("b0");
 		const view2 = makeView([...aged, b0], [vb("tail0")], 100_000, 96_000);
-		c.conduct(view2); // should launch #2
+		c.conduct(view2); // newlyAged grows → new key → launch #2
 
 		expect(host.completeCalls).toHaveLength(2);
 	});
 });
 
-// ── 6. Unavailable path ───────────────────────────────────────────────────────
+// ── 7. Unavailable path ───────────────────────────────────────────────────────
 
 describe("NaiveCompactionConductor — unavailable path (can(complete)===false)", () => {
 	it("returns [] and never calls complete when can returns false before a summary exists", () => {
@@ -678,7 +710,7 @@ describe("NaiveCompactionConductor — unavailable path (can(complete)===false)"
 		expect(host.statusText).toContain("waiting for live model link");
 	});
 
-	it("does not fall back to a deterministic group command", () => {
+	it("does not fall back to a deterministic group command in degrade mode", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost({ canComplete: false });
 		c.attach(host);
@@ -691,22 +723,7 @@ describe("NaiveCompactionConductor — unavailable path (can(complete)===false)"
 		expect(result).toEqual([]);
 	});
 
-	it("returns [] (not null) when there is fewer than 2 aged blocks in degrade mode", () => {
-		const c = new NaiveCompactionConductor();
-		const host = new MockHost({ canComplete: false });
-		c.attach(host);
-
-		// can("complete")===false and agedBlocks.length < 2 → can't form a group, no summary.
-		// Conductor has a definite "nothing to compact" answer → [] (clear to raw). FIX 3.
-		const aged = [vb("a0")]; // only 1 aged block
-		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
-		const result = c.conduct(view);
-
-		expect(result).toEqual([]);
-		expect(host.completeCalls).toHaveLength(0);
-	});
-
-	it("degrade with 0 aged blocks returns [] (nothing to group)", () => {
+	it("degrade with 0 aged blocks returns []", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost({ canComplete: false });
 		c.attach(host);
@@ -714,40 +731,11 @@ describe("NaiveCompactionConductor — unavailable path (can(complete)===false)"
 		const view = makeView([], [vb("tail0")], 100_000, 96_000);
 		const result = c.conduct(view);
 
-		// 0 aged blocks + no summary → [] per the early-exit check
 		expect(result).toEqual([]);
-	});
-
-	it("degrade returns [] (not group) when there are interleaved grouped blocks between first and last aged block", () => {
-		const c = new NaiveCompactionConductor();
-		const host = new MockHost({ canComplete: false });
-		c.attach(host);
-
-		// The aged region has non-grouped blocks, but between first and last there is a
-		// grouped block (which agedBlocks filtering excluded). The host's outward snap
-		// would sweep in the grouped block → invalid-group clamp. Conductor bails → [].
-		const first = vb("first0");
-		const grouped = vb("grp1", { grouped: true });
-		const last = vb("last2");
-		// All three are in the aged portion; grp1 is excluded from agedBlocks by filter
-		// but sits between first and last in conversation order.
-		const view: ConductorView = {
-			blocks: [first, grouped, last, vb("tail0")],
-			budget: 100_000,
-			contextWindow: null,
-			liveTokens: 96_000,
-			protectedFromIndex: 3, // first, grouped, last are aged; tail0 is protected
-			protectTokens: 20_000,
-		};
-
-		const result = c.conduct(view);
-		// Should NOT emit a group command because there is an interleaved grouped block.
-		expect(result).toEqual([]);
-		expect(host.completeCalls).toHaveLength(0);
 	});
 });
 
-// ── 7. detach() aborts in-flight completion ─────────────────────────────────
+// ── 8. detach() aborts in-flight completion ─────────────────────────────────
 
 describe("NaiveCompactionConductor — detach() lifecycle", () => {
 	it("detach() aborts the AbortSignal passed to in-flight complete", async () => {
@@ -765,13 +753,12 @@ describe("NaiveCompactionConductor — detach() lifecycle", () => {
 		expect(signal).toBeDefined();
 		expect(signal!.aborted).toBe(false);
 
-		// Detaching should abort the signal
 		c.detach();
 
 		expect(signal!.aborted).toBe(true);
 	});
 
-	it("after detach(), requestRerun from a late-resolving completion does not cause errors", async () => {
+	it("after detach(), a late-rejecting completion does not cause errors", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
@@ -784,9 +771,6 @@ describe("NaiveCompactionConductor — detach() lifecycle", () => {
 
 		c.detach();
 
-		// Late resolution after detach() — should be silently ignored
-		// (the abort causes the rejection branch, not resolution, but let's
-		// verify that if somehow the resolve fires it doesn't throw)
 		await expect(async () => {
 			pending.reject(new Error("aborted"));
 			await Promise.resolve();
@@ -811,7 +795,6 @@ describe("NaiveCompactionConductor — detach() lifecycle", () => {
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
 		const result = c.conduct(view);
 
-		// host is null after detach → returns null per the early guard
 		expect(result).toBeNull();
 	});
 
@@ -839,12 +822,89 @@ describe("NaiveCompactionConductor — detach() lifecycle", () => {
 		expect(c.conduct(overBudget)).toBeNull();
 		expect(host2.completeCalls).toHaveLength(1);
 	});
+
+	it("a stale completion resolving after re-attach does NOT corrupt the new session (guard)", async () => {
+		const c = new NaiveCompactionConductor();
+		const host1 = new MockHost();
+		c.attach(host1);
+
+		// Launch completion A in the first lifetime.
+		const viewA = makeView([vb("a0"), vb("a1")], [vb("tail0")], 100_000, 96_000);
+		c.conduct(viewA);
+		expect(host1.pending).toHaveLength(1);
+		const stalePending = host1.pending[0];
+
+		// Detach mid-flight (aborts A's controller) and re-attach a fresh host. A's promise is
+		// still pending — the MockHost does not auto-reject on abort, simulating a completer
+		// that resolves regardless of the signal.
+		c.detach();
+		const host2 = new MockHost();
+		c.attach(host2);
+
+		// Launch completion B in the new lifetime (same ids, fresh attempt key).
+		c.conduct(viewA);
+		expect(host2.pending).toHaveLength(1);
+		expect(host2.completeCalls).toHaveLength(1);
+
+		// Now A resolves LATE. The stale-completion guard must bail: B is still in-flight, so
+		// A's result must not overwrite summary/compactedIds or clear B's inflight.
+		stalePending.resolve({ text: "STALE SUMMARY FROM A", model: "old-model" });
+		await Promise.resolve();
+
+		// B is still pending (in-flight), and no summary has been committed.
+		expect(host2.pending).toHaveLength(1);
+		const holdWhileBInFlight = c.conduct(viewA);
+		expect(holdWhileBInFlight).toBeNull(); // no summary yet → hold
+
+		// B resolves: its summary commits (NOT A's stale one).
+		host2.resolveNext("FRESH SUMMARY FROM B");
+		await Promise.resolve();
+
+		const result = c.conduct(viewA);
+		expect(result).not.toBeNull();
+		const g = result!.find((cmd) => cmd.kind === "group") as { digest: string } | undefined;
+		expect(g).toBeDefined();
+		expect(g!.digest).toContain("FRESH SUMMARY FROM B");
+		expect(g!.digest).not.toContain("STALE SUMMARY FROM A");
+	});
+
+	it("a stale completion rejecting after re-attach does NOT clobber the new in-flight controller", async () => {
+		const c = new NaiveCompactionConductor();
+		const host1 = new MockHost();
+		c.attach(host1);
+
+		const view = makeView([vb("a0"), vb("a1")], [vb("tail0")], 100_000, 96_000);
+		c.conduct(view);
+		const stalePending = host1.pending[0];
+
+		c.detach();
+		const host2 = new MockHost();
+		c.attach(host2);
+		c.conduct(view); // launch B
+		expect(host2.pending).toHaveLength(1);
+
+		// A rejects late. The guard must bail — B's controller stays in-flight.
+		stalePending.reject(new Error("stale abort"));
+		await Promise.resolve();
+
+		// B is still pending (the stale reject did not clear it).
+		expect(host2.pending).toHaveLength(1);
+		// conduct still holds (B in-flight) → null (no summary yet).
+		expect(c.conduct(view)).toBeNull();
+
+		// B can still resolve normally.
+		host2.resolveNext("B SUMMARY");
+		await Promise.resolve();
+		const result = c.conduct(view);
+		expect(result).not.toBeNull();
+		expect((result!.find((cmd) => cmd.kind === "group") as { digest: string } | undefined)!.digest).toContain("B SUMMARY");
+	});
 });
 
-// ── 8. Prompt content (first compaction) ─────────────────────────────────────
+// ── 9. Prompt construction & system prompt ────────────────────────────────────
 
 describe("NaiveCompactionConductor — prompt construction", () => {
-	it("first prompt contains section header and block text for all aged blocks", () => {
+	it("first prompt contains the section header and block text for all aged blocks", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
@@ -859,14 +919,12 @@ describe("NaiveCompactionConductor — prompt construction", () => {
 		expect(host.completeCalls).toHaveLength(1);
 		const prompt = host.completeCalls[0].prompt;
 
-		// Should contain a section header for first compaction
 		expect(prompt).toContain("CONVERSATION HISTORY TO SUMMARIZE");
-		// Should contain the block texts
 		expect(prompt).toContain("do the thing");
 		expect(prompt).toContain("assistant reply text");
 	});
 
-	it("system prompt is the compaction template (not empty)", () => {
+	it("system prompt is the compaction template and instructs VERBATIM user-message preservation", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
@@ -878,9 +936,12 @@ describe("NaiveCompactionConductor — prompt construction", () => {
 		const { system } = host.completeCalls[0];
 		expect(system).toBeDefined();
 		expect(system!.length).toBeGreaterThan(50);
-		// Should include the structured output sections
+		// Structured output sections.
 		expect(system).toContain("Goal");
 		expect(system).toContain("Progress");
+		// The sacred rule: user messages reproduced verbatim.
+		expect(system).toContain("User messages".toLowerCase());
+		expect(system).toMatch(/VERBATIM/i);
 	});
 
 	it("maxOutputTokens is set to a positive number", () => {
@@ -910,7 +971,7 @@ describe("NaiveCompactionConductor — prompt construction", () => {
 	});
 });
 
-// ── 9. Held / grouped blocks are excluded from the aged region ────────────────
+// ── 10. Held / grouped blocks are excluded from the aged region ────────────────
 
 describe("NaiveCompactionConductor — held / grouped block exclusion", () => {
 	it("held blocks (human override) are not included in the aged region", () => {
@@ -925,7 +986,6 @@ describe("NaiveCompactionConductor — held / grouped block exclusion", () => {
 		c.conduct(view);
 		expect(host.completeCalls).toHaveLength(1);
 
-		// The prompt must include the non-held block's text but not necessarily the held block's
 		const prompt = host.completeCalls[0].prompt;
 		expect(prompt).toContain(`content of ${aged.id}`);
 	});
@@ -945,46 +1005,41 @@ describe("NaiveCompactionConductor — held / grouped block exclusion", () => {
 		expect(prompt).toContain(`content of ${aged.id}`);
 	});
 
-	it("when ALL aged blocks are held, aged region is empty → returns [] with no complete", () => {
+	it("when ALL aged blocks are held, the aged region is empty → returns [] with no complete", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
 
-		// Only held blocks in the aged region
 		const aged = [vb("h0", { held: true }), vb("h1", { held: true })];
 		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
 
 		const result = c.conduct(view);
-		expect(result).toEqual([]); // no aged blocks after filtering → []
+		expect(result).toEqual([]);
 		expect(host.completeCalls).toHaveLength(0);
 	});
 });
 
-// ── 10. Threshold boundary ────────────────────────────────────────────────────
+// ── 11. Threshold boundary (90% of the visible window) ────────────────────────
 
-describe("NaiveCompactionConductor — threshold boundary (95%)", () => {
-	it("triggers at exactly 95% (liveTokens === 0.95 * budget)", () => {
+describe("NaiveCompactionConductor — threshold boundary (90%)", () => {
+	it("triggers at exactly 90% (liveTokens === 0.90 * budget, no prior summary)", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
 
-		// 95000 / 100000 = exactly 95%
-		const view = makeView([vb("a0"), vb("a1")], [vb("tail0")], 100_000, 95_000);
+		const view = makeView([vb("a0"), vb("a1")], [vb("tail0")], 100_000, 90_000);
 		const result = c.conduct(view);
 
-		// Should trigger (>= check in implementation)
 		expect(result).toBeNull(); // null = completion in-flight
 		expect(host.completeCalls).toHaveLength(1);
 	});
 
-	it("does NOT trigger at 94.999% (just below threshold) — returns [] (no summary, aged blocks present)", () => {
+	it("does NOT trigger at 89.999% (just below threshold) — returns []", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
 
-		// Under threshold with aged blocks and no prior summary → conductor has a definite
-		// "nothing to compact" answer → [] (clear to raw). FIX 1.
-		const view = makeView([vb("a0"), vb("a1")], [vb("tail0")], 100_000, 94_999);
+		const view = makeView([vb("a0"), vb("a1")], [vb("tail0")], 100_000, 89_999);
 		const result = c.conduct(view);
 
 		expect(result).toEqual([]);
@@ -992,396 +1047,427 @@ describe("NaiveCompactionConductor — threshold boundary (95%)", () => {
 	});
 });
 
-// ── 11. DATA-LOSS REGRESSION: vanishing head / all gone ───────────────────────
-//
-// These tests are the regression guard for the blocker described in the adversarial review:
-// the prior cached-command path re-emitted stale cached ids (summary, compactedIds, headId)
-// without validating against the live view. If headId vanished, the head replace was
-// clamped, but the empty replaces for other compacted ids were applied VERBATIM → data loss.
-//
-// After the fix: `buildCommands(view)` re-derives the command set from the live view every
-// call. INVARIANT: the returned array NEVER contains replace(x,"") unless it also contains
-// replace(head, summary) on a block present in the current view.
+// ── 12. All kinds swallowed (user, tool_call, tool_result, thinking, text) ────
 
-describe("NaiveCompactionConductor — data-loss regression (FIX 1)", () => {
-	/**
-	 * Helper: set up a conductor that has successfully compacted {h, a, b} with h as head.
-	 * Returns the conductor and host; the caller can then craft views with missing blocks.
-	 *
-	 * Block order: h=order 0, a=order 1, b=order 2 → h is head (lowest order).
-	 */
-	async function setupCompacted(): Promise<{
-		conductor: NaiveCompactionConductor;
-		host: MockHost;
-		h: ViewBlock;
-		a: ViewBlock;
-		b: ViewBlock;
-	}> {
-		const conductor = new NaiveCompactionConductor();
-		const host = new MockHost();
-		conductor.attach(host);
-
-		const h = vb("h", { order: 0 });
-		const a = vb("a", { order: 1 });
-		const b = vb("b", { order: 2 });
-
-		const view = makeView([h, a, b], [vb("tail0")], 100_000, 96_000);
-		conductor.conduct(view);
-		host.resolveNext("THE SUMMARY");
-		await Promise.resolve();
-		// Commit: conduct once to apply the summary.
-		conductor.conduct(view);
-
-		return { conductor, host, h, a, b };
-	}
-
-	it("VANISHING HEAD: when head (h) is absent from view, summary re-homes to oldest survivor (a); b is emptied; h is not referenced", async () => {
-		const { conductor, a, b } = await setupCompacted();
-
-		// New view: h is GONE. a and b still present.
-		const viewWithoutH = makeView([a, b], [vb("tail0")], 100_000, 96_000);
-		const result = conductor.conduct(viewWithoutH);
-
-		expect(result).not.toBeNull();
-		expect(Array.isArray(result)).toBe(true);
-		const cmds = result!;
-
-		// INVARIANT: no replace(x,"") without a corresponding replace(newHead, summary).
-		const replaces = cmds.filter((c) => c.kind === "replace") as Array<{ id: string; content: string }>;
-		const emptyReplaces = replaces.filter((r) => r.content === "");
-		const summaryReplaces = replaces.filter((r) => r.content !== "");
-
-		// There must be exactly one summary replace (on a = oldest survivor)
-		expect(summaryReplaces).toHaveLength(1);
-		expect(summaryReplaces[0].id).toBe("a");
-		expect(summaryReplaces[0].content).toContain("THE SUMMARY");
-
-		// b should be emptied (it's the other survivor)
-		expect(emptyReplaces).toHaveLength(1);
-		expect(emptyReplaces[0].id).toBe("b");
-
-		// h must NOT be referenced at all
-		const allIds = replaces.map((r) => r.id);
-		expect(allIds).not.toContain("h");
-
-		// CRITICAL INVARIANT: every empty replace has a corresponding summary head in the array
-		for (const empty of emptyReplaces) {
-			expect(summaryReplaces.length).toBeGreaterThan(0);
-			// The summary head must be present in the SAME view (guaranteed by buildCommands)
-			expect(summaryReplaces[0].id).toBe("a"); // a is in viewWithoutH
-		}
-	});
-
-	it("ALL COMPACTED IDS ABSENT: when all of {h,a,b} are gone, conduct returns [] — no empties, no loss", async () => {
-		const { conductor } = await setupCompacted();
-
-		// New view: ALL compacted blocks are gone (resync / full truncation).
-		const viewAllGone = makeView([], [vb("tail0")], 100_000, 10_000);
-		const result = conductor.conduct(viewAllGone);
-
-		// Must return [] — clear to raw. No empties, no data loss.
-		expect(Array.isArray(result)).toBe(true);
-		expect(result).toEqual([]);
-	});
-
-	it("ALL COMPACTED IDS ABSENT (over threshold): even over threshold with no survivors, returns [] not empties", async () => {
-		const { conductor } = await setupCompacted();
-
-		// Still over threshold but all original compacted blocks are gone.
-		const viewAllGone = makeView([vb("new_aged")], [vb("tail0")], 100_000, 96_000);
-		const result = conductor.conduct(viewAllGone);
-
-		// The result is either [] (all gone) or a new completion launch (null — new aged content).
-		// Either way, it must NOT contain any replace("","").
-		if (Array.isArray(result)) {
-			const emptyReplaces = result
-				.filter((c) => c.kind === "replace")
-				.filter((c) => (c as { content: string }).content === "");
-			expect(emptyReplaces).toHaveLength(0);
-		}
-		// null is also acceptable — means a new completion launched for the new aged block.
-	});
-
-	it("LONE EMPTY INVARIANT: result never contains replace(x,'') without also containing replace(head,summary) on a present block", async () => {
-		// This test exhaustively verifies the invariant for the vanishing-head case.
-		const { conductor, a, b } = await setupCompacted();
-
-		// h is gone; only a and b survive
-		const view = makeView([a, b], [vb("tail0")], 100_000, 96_000);
-		const result = conductor.conduct(view);
-
-		expect(result).not.toBeNull();
-		const cmds = result! as Array<{ kind: string; id: string; content: string }>;
-
-		const emptyReplaces = cmds.filter((c) => c.kind === "replace" && c.content === "");
-		const summaryReplaces = cmds.filter((c) => c.kind === "replace" && c.content !== "");
-
-		if (emptyReplaces.length > 0) {
-			// If there are any empties, there MUST be exactly one summary head
-			expect(summaryReplaces).toHaveLength(1);
-			// And the head id must be present in the view
-			const blockIds = new Set(view.blocks.map((b) => b.id));
-			expect(blockIds.has(summaryReplaces[0].id)).toBe(true);
-		}
-	});
-});
-
-// ── 12. HEAD GROUPED/PROTECTED: re-homing or suppression ─────────────────────
-
-describe("NaiveCompactionConductor — head grouped/protected re-homing (FIX 1)", () => {
-	it("when head becomes grouped, summary re-homes to next oldest survivor; head not referenced", async () => {
+describe("NaiveCompactionConductor — all block kinds are swallowed", () => {
+	it("user, tool_call, tool_result, thinking, and text blocks ALL appear in the compaction prompt", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
 
-		const h = vb("h", { order: 0 });
-		const a = vb("a", { order: 1 });
-		const b = vb("b", { order: 2 });
-
-		const view1 = makeView([h, a, b], [vb("tail0")], 100_000, 96_000);
-		c.conduct(view1);
-		host.resolveNext("SUMMARY TEXT");
-		await Promise.resolve();
-		c.conduct(view1);
-
-		// Now h has become grouped (owned by a group overlay)
-		const hGrouped = { ...h, grouped: true };
-		const view2 = makeView([hGrouped, a, b], [vb("tail0")], 100_000, 96_000);
-		const result = c.conduct(view2);
-
-		expect(result).not.toBeNull();
-		const cmds = result! as Array<{ kind: string; id: string; content: string }>;
-		const replaces = cmds.filter((c) => c.kind === "replace");
-
-		// h is grouped → excluded from survivors → re-homes to a
-		const summaryReplace = replaces.find((r) => r.content !== "");
-		expect(summaryReplace).toBeDefined();
-		expect(summaryReplace!.id).toBe("a"); // a = oldest non-grouped survivor
-
-		// h must NOT be referenced
-		expect(replaces.map((r) => r.id)).not.toContain("h");
-	});
-
-	it("when head becomes protected, it's excluded from survivors; summary re-homes to next", async () => {
-		const c = new NaiveCompactionConductor();
-		const host = new MockHost();
-		c.attach(host);
-
-		const h = vb("h", { order: 0 });
-		const a = vb("a", { order: 1 });
-		const b = vb("b", { order: 2 });
-
-		const view1 = makeView([h, a, b], [vb("tail0")], 100_000, 96_000);
-		c.conduct(view1);
-		host.resolveNext("SUMMARY");
-		await Promise.resolve();
-		c.conduct(view1);
-
-		// h has become protected (protected tail grew to cover it)
-		const hProtected = { ...h, protected: true };
-		const view2 = makeView([hProtected, a, b], [vb("tail0")], 100_000, 96_000);
-		const result = c.conduct(view2);
-
-		expect(result).not.toBeNull();
-		const cmds = result! as Array<{ kind: string; id: string; content: string }>;
-		const replaces = cmds.filter((c) => c.kind === "replace");
-
-		// h is protected → excluded from survivors
-		expect(replaces.map((r) => r.id)).not.toContain("h");
-
-		// Summary re-homes to a (next oldest survivor)
-		const summaryReplace = replaces.find((r) => r.content !== "");
-		expect(summaryReplace).toBeDefined();
-		expect(summaryReplace!.id).toBe("a");
-
-		// INVARIANT: no lone empty
-		const emptyReplaces = replaces.filter((r) => r.content === "");
-		if (emptyReplaces.length > 0) {
-			expect(summaryReplace).toBeDefined();
-		}
-	});
-
-	it("when ALL compacted blocks are grouped, returns [] (no empties, no lone summary)", async () => {
-		const c = new NaiveCompactionConductor();
-		const host = new MockHost();
-		c.attach(host);
-
-		const h = vb("h", { order: 0 });
-		const a = vb("a", { order: 1 });
-
-		const view1 = makeView([h, a], [vb("tail0")], 100_000, 96_000);
-		c.conduct(view1);
-		host.resolveNext("SUMMARY");
-		await Promise.resolve();
-		c.conduct(view1);
-
-		// Both compacted blocks are now grouped
-		const hGrouped = { ...h, grouped: true };
-		const aGrouped = { ...a, grouped: true };
-		const view2 = makeView([hGrouped, aGrouped], [vb("tail0")], 100_000, 96_000);
-		const result = c.conduct(view2);
-
-		expect(Array.isArray(result)).toBe(true);
-		expect(result).toEqual([]);
-	});
-});
-
-// ── 13. TOOL_CALL EXCLUSION ───────────────────────────────────────────────────
-//
-// The host kind-checks and clamps non-foldable replace targets, including tool_call and
-// user. The conductor still avoids those targets itself: if the summary head were clamped
-// away while other empty replaces applied, the agent would lose history with no summary.
-
-describe("NaiveCompactionConductor — tool_call exclusion (FIX 2)", () => {
-	it("tool_call blocks in the aged region are never included in the compaction prompt", () => {
-		const c = new NaiveCompactionConductor();
-		const host = new MockHost();
-		c.attach(host);
-
-		const toolCall = vb("tc0", { kind: "tool_call", text: "TOOL_CALL_CONTENT", tokens: 500 });
-		const text = vb("t0", { kind: "text", text: "regular text block" });
-		const toolResult = vb("tr0", { kind: "tool_result", text: "TOOL_RESULT_CONTENT", tokens: 500 });
-
-		// All three are in the aged region
-		const view = makeView([toolCall, text, toolResult], [vb("tail0")], 100_000, 96_000);
+		const aged = [
+			vb("u0", { kind: "user", text: "USER INTENT TEXT", tokens: 500 }),
+			vb("t0", { kind: "text", text: "assistant prose", tokens: 500 }),
+			vb("th0", { kind: "thinking", text: "private reasoning", tokens: 500 }),
+			vb("tc0", { kind: "tool_call", text: "TOOL_CALL_BODY", toolName: "bash", tokens: 500 }),
+			vb("tr0", { kind: "tool_result", text: "TOOL_RESULT_BODY", toolName: "bash", tokens: 500 }),
+		];
+		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
 		c.conduct(view);
 
 		expect(host.completeCalls).toHaveLength(1);
 		const prompt = host.completeCalls[0].prompt;
 
-		// The tool_call text must NOT appear in the prompt (excluded from agedBlocks)
-		expect(prompt).not.toContain("TOOL_CALL_CONTENT");
-
-		// The tool_result and regular text SHOULD appear (they are not tool_call)
-		expect(prompt).toContain("regular text block");
-		expect(prompt).toContain("TOOL_RESULT_CONTENT");
+		// Every kind — including tool_call, which the old design excluded — is now fed to the LLM.
+		expect(prompt).toContain("USER INTENT TEXT");
+		expect(prompt).toContain("assistant prose");
+		expect(prompt).toContain("private reasoning");
+		expect(prompt).toContain("TOOL_CALL_BODY");
+		expect(prompt).toContain("TOOL_RESULT_BODY");
 	});
 
-	it("tool_call blocks are never used as the summary head", async () => {
+	it("the single group covers ALL kinds in the aged region (none left live by conductor choice)", async () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
 
-		// tool_call is the very first aged block (lowest order) — must NOT become head
-		const toolCall = vb("tc0", { kind: "tool_call", order: 0, tokens: 500 });
-		const text = vb("t0", { kind: "text", order: 1, tokens: 500 });
-
-		const view = makeView([toolCall, text], [vb("tail0")], 100_000, 96_000);
+		const aged = [
+			vb("u0", { kind: "user", order: 0, tokens: 500 }),
+			vb("t0", { kind: "text", order: 1, tokens: 500 }),
+			vb("tc0", { kind: "tool_call", order: 2, tokens: 500 }),
+			vb("tr0", { kind: "tool_result", order: 3, tokens: 500 }),
+		];
+		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
 		c.conduct(view);
-		host.resolveNext("summary text");
+		host.resolveNext("the summary");
 		await Promise.resolve();
 
 		const result = c.conduct(view);
 		expect(result).not.toBeNull();
-
-		const replaces = result! as Array<{ kind: string; id: string; content: string }>;
-		const summaryReplace = replaces
-			.filter((r) => r.kind === "replace")
-			.find((r) => r.content !== "");
-
-		// Summary must NOT land on the tool_call block
-		expect(summaryReplace).toBeDefined();
-		expect(summaryReplace!.id).not.toBe("tc0");
-
-		// tc0 must NOT appear in any replace command at all
-		const allReplaceIds = replaces.filter((r) => r.kind === "replace").map((r) => r.id);
-		expect(allReplaceIds).not.toContain("tc0");
+		expect(result!).toHaveLength(1);
+		const g = result![0] as { kind: string; ids: string[]; digest: string };
+		expect(g.kind).toBe("group");
+		// The group spans the first (u0) to the last (tr0) aged block — every kind is inside.
+		expect(g.ids).toEqual(["u0", "tr0"]);
 	});
 
-	it("conductor never emits replace(tool_call_id, '') — not as head, not as empty", async () => {
+	it("an aged region that is ONLY tool_call blocks still triggers and emits a group (the host owns pair-balance)", () => {
 		const c = new NaiveCompactionConductor();
 		const host = new MockHost();
 		c.attach(host);
 
-		// Mix of tool_call, text, tool_result in aged region
-		const tc = vb("tc", { kind: "tool_call", order: 0, tokens: 200 });
-		const tx = vb("tx", { kind: "text", order: 1, tokens: 200 });
-		const tr = vb("tr", { kind: "tool_result", order: 2, tokens: 200 });
-
-		const view = makeView([tc, tx, tr], [vb("tail0")], 100_000, 96_000);
-		c.conduct(view);
-		host.resolveNext("my summary");
-		await Promise.resolve();
-
-		const result = c.conduct(view);
-		expect(result).not.toBeNull();
-
-		// CRITICAL: no replace should ever target the tool_call id
-		const replaces = result!.filter((r) => r.kind === "replace") as Array<{ id: string; content: string }>;
-		const tcReplace = replaces.find((r) => r.id === "tc");
-		expect(tcReplace).toBeUndefined();
-	});
-
-	it("when aged region is ONLY tool_call blocks, returns [] (nothing to compact)", () => {
-		const c = new NaiveCompactionConductor();
-		const host = new MockHost();
-		c.attach(host);
-
-		// Only tool_call blocks aged — after exclusion, agedBlocks is empty
 		const tc1 = vb("tc1", { kind: "tool_call", tokens: 50_000 });
-		const tc2 = vb("tc2", { kind: "tool_call", tokens: 50_000 });
-
+		const tc2 = vb("tc2", { kind: "tool_call", tokens: 46_000 });
 		const view = makeView([tc1, tc2], [vb("tail0")], 100_000, 96_000);
 		const result = c.conduct(view);
 
-		// No eligible aged blocks → returns []
-		expect(result).toEqual([]);
-		expect(host.completeCalls).toHaveLength(0);
-	});
-
-	it("when oldest compacted survivor is user, summary re-homes to oldest replaceable block", async () => {
-		const c = new NaiveCompactionConductor();
-		const host = new MockHost();
-		c.attach(host);
-
-		const user = vb("u0", { kind: "user", order: 0, text: "original user intent" });
-		const text = vb("t0", { kind: "text", order: 1, text: "assistant text" });
-		const thought = vb("th0", { kind: "thinking", order: 2, text: "assistant thought" });
-		const view = makeView([user, text, thought], [vb("tail0")], 100_000, 96_000);
-
-		c.conduct(view);
+		// No longer excluded → a completion launches (returns null while in-flight).
+		expect(result).toBeNull();
 		expect(host.completeCalls).toHaveLength(1);
-		// User content may be part of the summary prompt for context, but user blocks must stay
-		// live and must never become replace targets.
-		expect(host.completeCalls[0].prompt).toContain("original user intent");
-		host.resolveNext("summary text");
-		await Promise.resolve();
-
-		const result = c.conduct(view);
-		expect(result).not.toBeNull();
-		const replaces = result!.filter((r) => r.kind === "replace") as Array<{ id: string; content: string }>;
-		expect(replaces.map((r) => r.id)).not.toContain("u0");
-
-		const summaryReplace = replaces.find((r) => r.content !== "");
-		expect(summaryReplace).toBeDefined();
-		expect(summaryReplace!.id).toBe("t0");
-		expect(summaryReplace!.content).toContain("summary text");
-
-		const emptyReplaces = replaces.filter((r) => r.content === "");
-		expect(emptyReplaces.map((r) => r.id)).toEqual(["th0"]);
-	});
-
-	it("when aged region is only user blocks, does not launch a useless completion", () => {
-		const c = new NaiveCompactionConductor();
-		const host = new MockHost();
-		c.attach(host);
-
-		const view = makeView(
-			[vb("u0", { kind: "user", tokens: 50_000 }), vb("u1", { kind: "user", tokens: 45_000 })],
-			[vb("tail0")],
-			100_000,
-			96_000,
-		);
-
-		expect(c.conduct(view)).toEqual([]);
-		expect(host.completeCalls).toHaveLength(0);
 	});
 });
 
-// ── 14. STORE-LEVEL REGRESSION: non-foldable oldest block ─────────────────────
+// ── 13. Empty completion text is a failure ────────────────────────────────────
+
+describe("NaiveCompactionConductor — empty completion result", () => {
+	it("empty completion text is treated as failure: prior state preserved, no header-only group", async () => {
+		const c = new NaiveCompactionConductor();
+		const host = new MockHost();
+		c.attach(host);
+
+		const aged = [vb("a0"), vb("a1")];
+		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
+
+		expect(c.conduct(view)).toBeNull();
+		host.resolveNext("   \n\t  ");
+		await Promise.resolve();
+		expect(host.statusText).toContain("empty summary");
+
+		// No summary committed → clear to raw, no group emitted.
+		const result = c.conduct(view);
+		expect(result).toEqual([]);
+		expect(host.requestRerunCalls).toBe(0);
+	});
+
+	it("an empty result does NOT clobber a prior committed summary", async () => {
+		const c = new NaiveCompactionConductor();
+		const host = new MockHost();
+		c.attach(host);
+
+		const aged = [vb("a0"), vb("a1")];
+		const view = makeView(aged, [vb("tail0")], 100_000, 96_000);
+
+		// First, commit a real summary.
+		c.conduct(view);
+		host.resolveNext("REAL SUMMARY");
+		await Promise.resolve();
+		c.conduct(view);
+
+		// Force a second launch by aging in a new block, then return empty.
+		const b0 = vb("b0");
+		const view2 = makeView([...aged, b0], [vb("tail0")], 100_000, 96_000);
+		c.conduct(view2); // launch #2
+		expect(host.completeCalls).toHaveLength(2);
+		host.resolveNext("   ");
+		await Promise.resolve();
+
+		// The prior REAL SUMMARY must still be emitted (not replaced by an empty/header group).
+		const result = c.conduct(view2);
+		expect(result).not.toBeNull();
+		const g = result!.find((cmd) => cmd.kind === "group") as { digest: string } | undefined;
+		expect(g).toBeDefined();
+		expect(g!.digest).toContain("REAL SUMMARY");
+	});
+});
+
+// ── 14. attemptKey on newlyAged ───────────────────────────────────────────────
+
+describe("NaiveCompactionConductor — attemptKey keyed on newlyAged", () => {
+	it("after a successful compaction, shrinking the aged set (human pins a newly-aged block) does NOT relaunch", async () => {
+		const c = new NaiveCompactionConductor();
+		const host = new MockHost();
+		c.attach(host);
+
+		const x0 = vb("x0", { order: 0 });
+		const x1 = vb("x1", { order: 1 });
+		const viewFirst = makeView([x0, x1], [vb("tail0")], 100_000, 96_000);
+
+		// Successful first compaction.
+		c.conduct(viewFirst);
+		host.resolveNext("summary");
+		await Promise.resolve();
+		c.conduct(viewFirst); // commit
+
+		// b0 ages in → newlyAged = [b0] → launch #2.
+		const b0 = vb("b0", { order: 2 });
+		const viewWithB0 = makeView([x0, x1, b0], [vb("tail0")], 100_000, 96_000);
+		c.conduct(viewWithB0);
+		expect(host.completeCalls).toHaveLength(2);
+
+		host.rejectNext(new Error("error"));
+		await Promise.resolve();
+
+		// Shrink: b0 becomes held → agedBlocks no longer contains b0 → newlyAged = [].
+		// needSummary = false (newlyAged empty) → no relaunch.
+		const b0Held = { ...b0, held: true };
+		const viewShrunk = makeView([x0, x1, b0Held], [vb("tail0")], 100_000, 96_000);
+		c.conduct(viewShrunk);
+
+		expect(host.completeCalls).toHaveLength(2); // still 2, no new launch
+	});
+
+	it("after rejection, adding a genuinely NEW aged block relaunches (attempt key changes)", async () => {
+		const c = new NaiveCompactionConductor();
+		const host = new MockHost();
+		c.attach(host);
+
+		const a0 = vb("a0");
+		const a1 = vb("a1");
+		const view1 = makeView([a0, a1], [vb("tail0")], 100_000, 96_000);
+
+		c.conduct(view1); // launch #1
+		host.rejectNext(new Error("error"));
+		await Promise.resolve();
+
+		c.conduct(view1); // same set → no relaunch
+		expect(host.completeCalls).toHaveLength(1);
+
+		const b0 = vb("b0");
+		const view2 = makeView([a0, a1, b0], [vb("tail0")], 100_000, 96_000);
+		c.conduct(view2); // newlyAged grows → launch #2
+
+		expect(host.completeCalls).toHaveLength(2);
+	});
+
+	it("after a successful compaction, a new block ages in → relaunch; same newlyAged after a reject does not", async () => {
+		const c = new NaiveCompactionConductor();
+		const host = new MockHost();
+		c.attach(host);
+
+		const a0 = vb("a0");
+		const a1 = vb("a1");
+		const view1 = makeView([a0, a1], [vb("tail0")], 100_000, 96_000);
+
+		c.conduct(view1);
+		host.resolveNext("summary one");
+		await Promise.resolve();
+		c.conduct(view1); // commit
+
+		const b0 = vb("b0");
+		const view2 = makeView([a0, a1, b0], [vb("tail0")], 100_000, 96_000);
+		c.conduct(view2); // launches #2, key = "b0"
+		expect(host.completeCalls).toHaveLength(2);
+
+		host.rejectNext(new Error("error"));
+		await Promise.resolve();
+
+		c.conduct(view2); // same newlyAged=[b0] → no relaunch
+		expect(host.completeCalls).toHaveLength(2);
+
+		const c0 = vb("c0");
+		const view3 = makeView([a0, a1, b0, c0], [vb("tail0")], 100_000, 96_000);
+		c.conduct(view3); // newlyAged=[b0,c0] → new key → launch #3
+		expect(host.completeCalls).toHaveLength(3);
+	});
+});
+
+// ── 15. Degrade must not clobber an existing LLM summary ──────────────────────
+
+describe("NaiveCompactionConductor — degrade must not clobber an existing LLM summary", () => {
+	async function setupWithSummary(): Promise<{
+		conductor: NaiveCompactionConductor;
+		host: MockHost;
+		a0: ViewBlock;
+		a1: ViewBlock;
+		summaryText: string;
+	}> {
+		const conductor = new NaiveCompactionConductor();
+		const host = new MockHost({ canComplete: true });
+		conductor.attach(host);
+
+		// Small blocks (1k each) with a large raw liveTokens: after compaction the saving is
+		// tiny, so the VISIBLE window stays well over 90%. That lets the degrade tests push
+		// `needSummary` true (over threshold + newly-aged) while the model link is down — the
+		// exact path that surfaces the "waiting for live model link" status.
+		const a0 = vb("a0", { order: 0, tokens: 1_000 });
+		const a1 = vb("a1", { order: 1, tokens: 1_000 });
+		const tail0 = vb("tail0", { tokens: 4_000 });
+
+		const view = makeView([a0, a1], [tail0], 100_000, 96_000);
+
+		conductor.conduct(view);
+		expect(host.completeCalls).toHaveLength(1);
+
+		const summaryText = "LLM GENERATED SUMMARY — DO NOT CLOBBER";
+		host.resolveNext(summaryText);
+		await Promise.resolve();
+
+		const committed = conductor.conduct(view);
+		expect(committed).not.toBeNull();
+		const g = (committed as Array<{ kind: string; digest: string }>).find((c) => c.kind === "group");
+		expect(g).toBeDefined();
+		expect(g!.digest).toContain(summaryText);
+
+		return { conductor, host, a0, a1, summaryText };
+	}
+
+	it("when the model link drops and a newly-aged block keeps visible over threshold, re-emits the existing summary group — no relaunch", async () => {
+		const { conductor, host, a0, a1, summaryText } = await setupWithSummary();
+
+		host.canComplete = false;
+
+		// A new block ages in; the prior saving is small so visible is still over 90% →
+		// needSummary is true. But the link is down → degrade: re-emit the existing summary
+		// group, surface the "waiting" status, and do NOT launch.
+		const newBlock = vb("new1", { order: 2, tokens: 2_000 });
+		const viewOverThreshold = makeView(
+			[a0, a1, newBlock],
+			[vb("tail0", { tokens: 4_000 })],
+			100_000,
+			98_000,
+		);
+
+		const result = conductor.conduct(viewOverThreshold);
+
+		expect(result).not.toBeNull();
+		expect(Array.isArray(result)).toBe(true);
+		const cmds = result!;
+
+		// The existing LLM summary group is re-emitted (covers a0, a1).
+		const groups = cmds.filter((cmd) => cmd.kind === "group") as Array<{
+			ids: string[];
+			digest: string;
+		}>;
+		expect(groups).toHaveLength(1);
+		expect(groups[0].digest).toContain(summaryText);
+		expect(groups[0].ids).toEqual(["a0", "a1"]);
+
+		// No new complete call while the link is down.
+		expect(host.completeCalls).toHaveLength(1);
+		expect(host.statusText).toContain("waiting for live model link");
+	});
+
+	it("when the model link drops but visible is below threshold, re-emits the existing summary group", async () => {
+		const { conductor, host, a0, a1, summaryText } = await setupWithSummary();
+
+		host.canComplete = false;
+
+		const viewUnder = makeView([a0, a1], [vb("tail0")], 100_000, 50_000);
+		const result = conductor.conduct(viewUnder);
+
+		expect(Array.isArray(result)).toBe(true);
+		const cmds = result! as Array<{ kind: string; ids: string[]; digest: string }>;
+		const groups = cmds.filter((c) => c.kind === "group");
+		expect(groups).toHaveLength(1);
+		expect(groups[0].digest).toContain(summaryText);
+	});
+
+	it("after the model link recovers, the next conduct relaunches to pick up newly-aged blocks", async () => {
+		const { conductor, host, a0, a1 } = await setupWithSummary();
+
+		host.canComplete = false;
+		const newBlock = vb("new3", { order: 2, tokens: 2_000 });
+		const viewDegraded = makeView([a0, a1, newBlock], [vb("tail0")], 100_000, 96_000);
+		conductor.conduct(viewDegraded);
+		expect(host.completeCalls).toHaveLength(1); // no new launch while link is down
+
+		// Restore the link — visible is over 90% (large raw window) and newlyAged=[new3] → relaunch.
+		host.canComplete = true;
+		conductor.conduct(viewDegraded);
+		expect(host.completeCalls).toHaveLength(2);
+	});
+});
+
+// ── 16. DATA-LOSS-CLASS regression: vanished compacted blocks ─────────────────
+//
+// With the group shape there is no "empty replace without a summary head" failure mode
+// (a group either collapses to the summary or is clamped and the blocks stay live). These
+// tests pin the graceful re-derivation: vanished blocks simply drop out of the survivor
+// run; the group re-homes to the remaining survivors; if all vanish, [] (clear to raw).
+
+describe("NaiveCompactionConductor — vanished compacted blocks (regression)", () => {
+	async function setupCompacted(): Promise<{
+		conductor: NaiveCompactionConductor;
+		host: MockHost;
+		a: ViewBlock;
+		b: ViewBlock;
+		c: ViewBlock;
+	}> {
+		const conductor = new NaiveCompactionConductor();
+		const host = new MockHost();
+		conductor.attach(host);
+
+		const a = vb("a", { order: 0 });
+		const b = vb("b", { order: 1 });
+		const c = vb("c", { order: 2 });
+
+		const view = makeView([a, b, c], [vb("tail0")], 100_000, 96_000);
+		conductor.conduct(view);
+		host.resolveNext("THE SUMMARY");
+		await Promise.resolve();
+		conductor.conduct(view); // commit
+
+		return { conductor, host, a, b, c };
+	}
+
+	it("when the first survivor vanishes, the group re-homes to the remaining contiguous survivors", async () => {
+		const { conductor, b, c } = await setupCompacted();
+
+		// a is gone; b and c survive.
+		const view = makeView([b, c], [vb("tail0")], 100_000, 96_000);
+		const result = conductor.conduct(view);
+
+		expect(result).not.toBeNull();
+		expect(result!).toHaveLength(1);
+		const g = result![0] as { kind: string; ids: string[]; digest: string };
+		expect(g.kind).toBe("group");
+		expect(g.ids).toEqual(["b", "c"]);
+		expect(g.digest).toContain("THE SUMMARY");
+	});
+
+	it("when the last survivor vanishes, the group spans the remaining prefix", async () => {
+		const { conductor, a, b } = await setupCompacted();
+
+		const view = makeView([a, b], [vb("tail0")], 100_000, 96_000);
+		const result = conductor.conduct(view);
+
+		expect(result).not.toBeNull();
+		const g = result![0] as { ids: string[] };
+		expect(g.ids).toEqual(["a", "b"]);
+	});
+
+	it("when ALL compacted blocks vanish, returns [] (clear to raw; no lone empties possible)", async () => {
+		const { conductor } = await setupCompacted();
+
+		const viewAllGone = makeView([], [vb("tail0")], 100_000, 10_000);
+		const result = conductor.conduct(viewAllGone);
+
+		expect(Array.isArray(result)).toBe(true);
+		expect(result).toEqual([]);
+	});
+
+	it("a held block splitting the survivors yields one group per side (no span across the held block)", async () => {
+		const { conductor, a, b, c } = await setupCompacted();
+
+		// b becomes held → it splits [a, b, c] into [a] and [c]. The conductor walks the FULL
+		// aged prefix (including the held block), so it flushes a run at b: one group over [a]
+		// and one over [c], each carrying the summary. Spanning a..c instead would make the host
+		// clamp the whole group `human-override`, dropping the summary for ALL survivors.
+		const bHeld = { ...b, held: true };
+		const view = makeView([a, bHeld, c], [vb("tail0")], 100_000, 96_000);
+		const result = conductor.conduct(view);
+
+		expect(result).not.toBeNull();
+		const groups = result!.filter((cmd) => cmd.kind === "group") as Array<{
+			ids: string[];
+			digest: string;
+		}>;
+		expect(groups).toHaveLength(2);
+		// First group covers a alone; second covers c alone. b is in neither.
+		expect(groups[0].ids).toEqual(["a", "a"]);
+		expect(groups[1].ids).toEqual(["c", "c"]);
+		for (const g of groups) expect(g.digest).toContain("THE SUMMARY");
+		const allIds = groups.flatMap((g) => g.ids);
+		expect(allIds).not.toContain("b");
+		// No replace commands ever — the group shape emits no empties.
+		expect(result!.every((cmd) => cmd.kind === "group")).toBe(true);
+	});
+});
+
+// ── 17. AccordionStore integration ────────────────────────────────────────────
 
 describe("NaiveCompactionConductor — AccordionStore integration", () => {
-	it("delivers the summary through the real store when the oldest aged block is user", async () => {
+	it("delivers the summary as a single folded group covering the aged region (user blocks swallowed, tail untouched)", async () => {
 		const blocks = [
 			blk(0, "user", 1000, { text: "opening user request" }),
 			blk(1, "text", 2000, { text: "assistant progress" }),
@@ -1397,327 +1483,66 @@ describe("NaiveCompactionConductor — AccordionStore integration", () => {
 		s.attach(new NaiveCompactionConductor());
 		await flushMicrotasks();
 
-		const user = s.blocks[0];
-		const summaryHead = s.blocks[1];
-		const thinking = s.blocks[2];
-		const toolResult = s.blocks[3];
+		// Exactly one conductor-owned group, folded, carrying the LLM summary verbatim.
+		expect(s.groups.length).toBe(1);
+		const g = s.groups[0];
+		expect(g.folded).toBe(true);
+		expect(g.by).toBe("auto");
+		expect(s.isDropGroup(g)).toBe(false);
+		expect(s.groupSummary(g)).toContain("STORE LEVEL SUMMARY");
 
-		// The bug: this used to choose the user block as head. The store correctly clamped that
-		// replace as not-foldable, so the summary vanished while other aged blocks folded.
+		// The group covers the whole aged region (blocks 0–3) — including the user block,
+		// which the old replace-based design left live. The protected tail (block 4) is NOT a member.
+		expect(g.memberIds).toContain("m0:p0"); // user
+		expect(g.memberIds).toContain("m1:p0"); // text
+		expect(g.memberIds).toContain("m2:p0"); // thinking
+		expect(g.memberIds).toContain("m3:p0"); // tool_result
+		expect(g.memberIds).not.toContain("m4:p0"); // tail
+
+		// The summary actually lands on the wire (the carrier renders the digest), and no
+		// invalid-group / not-foldable clamp fired in the happy path.
+		expect(s.lastReports.some((r) => r.reason === "invalid-group")).toBe(false);
 		expect(s.lastReports.some((r) => r.reason === "not-foldable")).toBe(false);
-		expect(user.autoFolded).toBe(false);
-		expect(user.subst).toBeUndefined();
-
-		// The summary must land on the oldest foldable/rewriteable block instead.
-		expect(summaryHead.autoFolded).toBe(true);
-		expect(summaryHead.subst).toContain("STORE LEVEL SUMMARY");
-
-		// Other foldable aged blocks are compacted behind the summary head.
-		expect(thinking.autoFolded).toBe(true);
-		expect(toolResult.autoFolded).toBe(true);
-	});
-});
-
-// ── 15. ATTEMPTKEY ON NEWLYAGED ───────────────────────────────────────────────
-//
-// FIX 3: the attempt key is now based on the NEWLY AGED ids (not the full aged set).
-// A pure SHRINK of the aged set (hold/pin removes an old block, no new blocks arrive)
-// must NOT relaunch — newlyAged is unchanged, key is unchanged.
-// Adding a genuinely NEW aged block MUST allow a retry.
-
-describe("NaiveCompactionConductor — attemptKey keyed on newlyAged (FIX 3)", () => {
-	it("after rejection, SHRINKING the aged set (human pins old block, no new blocks) does NOT relaunch", async () => {
-		const c = new NaiveCompactionConductor();
-		const host = new MockHost();
-		c.attach(host);
-
-		const a0 = vb("a0");
-		const a1 = vb("a1");
-		const view1 = makeView([a0, a1], [vb("tail0")], 100_000, 96_000);
-
-		// First conduct: newlyAged = [a0, a1] → launch with key = sorted join of {a0, a1}
-		c.conduct(view1);
-		expect(host.completeCalls).toHaveLength(1);
-
-		// Reject the completion
-		host.rejectNext(new Error("transient error"));
-		await Promise.resolve();
-
-		// Shrink: human pins a0 (it becomes held → excluded from agedBlocks).
-		// newlyAged for next conduct = [a1] (a0 is now held, a1 was never compacted).
-		// WAIT — actually newlyAged = agedBlocks.filter(!compactedIds.has) and compactedIds
-		// is empty (no successful compaction yet). So newlyAged = [a1] after a0 is held.
-		// The OLD attempt key was sorted([a0, a1]) = "a0\0a1".
-		// The NEW attempt key is sorted([a1]) = "a1".
-		// "a1" ≠ "a0\0a1" → this WOULD relaunch under old logic (full aged set).
-		// Under new logic (newlyAged): old key = "a0\0a1", new newlyAged = [a1], new key = "a1" → relaunches.
-		//
-		// Hmm — that's still a relaunch. Let me reconsider what "shrink" means for newlyAged:
-		// Before fix: key = sorted(agedBlocks) = sorted([a0, a1]) = "a0\0a1"
-		// After shrink (a0 held): agedBlocks = [a1], newlyAged = [a1], key = "a1" ≠ "a0\0a1" → relaunch under old
-		// Under new fix: lastAttemptKey = sorted(newlyAged at launch time) = "a0\0a1"
-		//   After shrink: newlyAged = [a1], newAttemptKey = "a1" ≠ "a0\0a1" → still relaunches...
-		//
-		// The spec says: "a pure SHRINK of the aged set (remove/hold an old block, no new blocks)
-		// changes the key [under old logic] and causes a wasteful relaunch." The FIX re-keys on
-		// newlyAged. For the scenario where {a0,a1} were the newly aged ids on first launch,
-		// and a0 is subsequently held (excluded), the NEW newlyAged is still [a1] alone.
-		// The prior attempt key (based on newlyAged at launch) = "a0\0a1".
-		// New attempt key = "a1" ≠ old → still different → would still relaunch.
-		//
-		// BUT: the spec's real concern is about a scenario where compactedIds is non-empty.
-		// E.g. after a successful compaction of {a0, a1, a2}, if a3 ages in and then a human
-		// pins a3 (removing it from consideration), newlyAged goes from [a3] to [] → no trigger.
-		// The scenario where things still aged in and one got held is trickier.
-		//
-		// Let's test the scenario the spec actually describes: after a successful compaction
-		// of {a0, a1}, a new block b0 ages in (making newlyAged=[b0]), we launch, get rejected,
-		// then a human holds/removes b0 (newlyAged becomes []) → no relaunch (needSummary=false).
-
-		// For the pure no-new-content shrink scenario after rejection with compactedIds empty,
-		// both old and new logic would potentially differ only in the shrink-from-nonempty-compacted case.
-		// The actual observable guard is: if newlyAged is identical after shrink, don't relaunch.
-
-		// Test the scenario that the spec clearly covers: after a SUCCESSFUL compaction of {a0,a1},
-		// b0 ages in → newlyAged=[b0] → launch → reject → then b0 is HELD (shrink of newlyAged):
-		const c2 = new NaiveCompactionConductor();
-		const host2 = new MockHost();
-		c2.attach(host2);
-
-		const x0 = vb("x0", { order: 0 });
-		const x1 = vb("x1", { order: 1 });
-		const viewFirst = makeView([x0, x1], [vb("tail0")], 100_000, 96_000);
-
-		// First compaction: successful
-		c2.conduct(viewFirst);
-		host2.resolveNext("summary");
-		await Promise.resolve();
-		c2.conduct(viewFirst); // commit
-
-		// b0 ages in → newlyAged = [b0] → launch
-		const b0 = vb("b0", { order: 2 });
-		const viewWithB0 = makeView([x0, x1, b0], [vb("tail0")], 100_000, 96_000);
-		c2.conduct(viewWithB0);
-		expect(host2.completeCalls).toHaveLength(2); // second launch
-
-		// Reject
-		host2.rejectNext(new Error("error"));
-		await Promise.resolve();
-
-		// NOW shrink: b0 becomes held → agedBlocks no longer contains b0 → newlyAged = []
-		// needSummary = false (newlyAged is empty) → returns prior commands, no launch.
-		const b0Held = { ...b0, held: true };
-		const viewShrunk = makeView([x0, x1, b0Held], [vb("tail0")], 100_000, 96_000);
-		c2.conduct(viewShrunk);
-
-		// Must NOT launch again (needSummary=false because newlyAged=[])
-		expect(host2.completeCalls).toHaveLength(2); // still 2, no new launch
 	});
 
-	it("after rejection, adding a genuinely NEW aged block must relaunch (attempt key changes)", async () => {
-		const c = new NaiveCompactionConductor();
-		const host = new MockHost();
-		c.attach(host);
+	it("re-compacts recursively when new blocks age in over the high-water mark", async () => {
+		// Start: an aged region of two blocks, a tiny tail, a tight budget.
+		const blocks = [
+			blk(0, "text", 2000, { text: "first aged block" }),
+			blk(1, "text", 2000, { text: "second aged block" }),
+			blk(2, "text", 200, { text: "tail" }),
+		];
+		const s = makeStore(blocks);
+		s.setProtect(200);
+		s.setBudget(4_000);
+		let callCount = 0;
+		s.completer = async () => ({ text: `SUMMARY ${++callCount}`, model: "test-model" });
 
-		const a0 = vb("a0");
-		const a1 = vb("a1");
-		const view1 = makeView([a0, a1], [vb("tail0")], 100_000, 96_000);
+		s.attach(new NaiveCompactionConductor());
+		await flushMicrotasks();
 
-		c.conduct(view1); // launch #1, key = sorted(newlyAged) = "a0\0a1"
-		host.rejectNext(new Error("error"));
-		await Promise.resolve();
+		// First compaction: one group over blocks 0–1.
+		expect(s.groups.length).toBe(1);
+		expect(s.groupSummary(s.groups[0])).toContain("SUMMARY 1");
+		expect(s.groups[0].memberIds).toContain("m0:p0");
+		expect(s.groups[0].memberIds).toContain("m1:p0");
+		expect(callCount).toBe(1);
 
-		// Same set → no relaunch
-		c.conduct(view1);
-		expect(host.completeCalls).toHaveLength(1);
+		// Append fresh content: a large newly-aged block (m3) plus a new tail (m4). The raw
+		// window grows past 90% again, newlyAged becomes non-empty → a second compaction fires.
+		s.appendBlocks([
+			blk(3, "text", 4000, { text: "newly aged content" }),
+			blk(4, "text", 200, { text: "new tail" }),
+		]);
+		s.setProtect(200);
+		await flushMicrotasks();
 
-		// Add a new block → newlyAged grows → new key → relaunch
-		const b0 = vb("b0");
-		const view2 = makeView([a0, a1, b0], [vb("tail0")], 100_000, 96_000);
-		c.conduct(view2); // launch #2
-
-		expect(host.completeCalls).toHaveLength(2);
-	});
-
-	it("after successful compaction, new block ages in → newlyAged=[new] → new attempt key → relaunch", async () => {
-		const c = new NaiveCompactionConductor();
-		const host = new MockHost();
-		c.attach(host);
-
-		const a0 = vb("a0");
-		const a1 = vb("a1");
-		const view1 = makeView([a0, a1], [vb("tail0")], 100_000, 96_000);
-
-		// Successful first compaction
-		c.conduct(view1);
-		host.resolveNext("summary one");
-		await Promise.resolve();
-		c.conduct(view1); // commit
-
-		// Reject a second attempt that launched when b0 aged in
-		const b0 = vb("b0");
-		const view2 = makeView([a0, a1, b0], [vb("tail0")], 100_000, 96_000);
-		c.conduct(view2); // launches second completion, key = "b0"
-		expect(host.completeCalls).toHaveLength(2);
-
-		host.rejectNext(new Error("error"));
-		await Promise.resolve();
-
-		// Same newlyAged=[b0] → same key "b0" → no relaunch
-		c.conduct(view2);
-		expect(host.completeCalls).toHaveLength(2);
-
-		// A genuinely new block c0 ages in → newlyAged=[b0,c0] → new key → relaunch
-		const c0 = vb("c0");
-		const view3 = makeView([a0, a1, b0, c0], [vb("tail0")], 100_000, 96_000);
-		c.conduct(view3);
-		expect(host.completeCalls).toHaveLength(3);
-	});
-});
-
-// ── 15. DEGRADE PATH MUST NOT CLOBBER AN EXISTING LLM SUMMARY ────────────────
-//
-// Regression guard for FIX #1: when the model link drops (can("complete") returns false)
-// AFTER a successful LLM compaction has already been committed, the degrade path must
-// preserve the existing summary and return buildCommands(view) — not replace it with a
-// host-generated group command, which would clobber the richer LLM prose and leave
-// this.summary out of sync with what the host actually sees.
-
-describe("NaiveCompactionConductor — degrade must not clobber an existing LLM summary (FIX #1)", () => {
-	/**
-	 * Set up a conductor that has successfully compacted [a0, a1] with a real LLM summary.
-	 * Returns the conductor, host, and blocks for further manipulation.
-	 */
-	async function setupWithSummary(): Promise<{
-		conductor: NaiveCompactionConductor;
-		host: MockHost;
-		a0: ViewBlock;
-		a1: ViewBlock;
-		summaryText: string;
-	}> {
-		const conductor = new NaiveCompactionConductor();
-		const host = new MockHost({ canComplete: true });
-		conductor.attach(host);
-
-		const a0 = vb("a0", { order: 0, tokens: 50_000 });
-		const a1 = vb("a1", { order: 1, tokens: 46_000 });
-		const tail0 = vb("tail0", { tokens: 4_000 });
-
-		const view = makeView([a0, a1], [tail0], 100_000, 96_000);
-
-		// First conduct: triggers compaction (96 000 >= 0.95 * 100 000)
-		conductor.conduct(view);
-		expect(host.completeCalls).toHaveLength(1);
-
-		// Resolve with a recognisable summary string
-		const summaryText = "LLM GENERATED SUMMARY — DO NOT CLOBBER";
-		host.resolveNext(summaryText);
-		await Promise.resolve(); // flush microtask (resolve handler + requestRerun)
-
-		// One post-completion conduct to commit the summary into the host
-		const committed = conductor.conduct(view);
-		expect(committed).not.toBeNull();
-		const headCmd = (committed as Array<{ kind: string; id: string; content: string }>).find(
-			(c) => c.kind === "replace" && c.content !== "",
-		);
-		expect(headCmd).toBeDefined();
-		expect(headCmd!.content).toContain(summaryText);
-
-		return { conductor, host, a0, a1, summaryText };
-	}
-
-	it("when model link drops and a newly-aged block pushes liveTokens over threshold, returns existing summary replace-set — NO group", async () => {
-		const { conductor, host, a0, a1, summaryText } = await setupWithSummary();
-
-		// Simulate model-link drop
-		host.canComplete = false;
-
-		// Add a newly-aged block and push liveTokens back over threshold
-		const newBlock = vb("new1", { order: 2, tokens: 2_000 });
-		const viewOverThreshold = makeView(
-			[a0, a1, newBlock],
-			[vb("tail0", { tokens: 4_000 })],
-			100_000,
-			98_000,
-		);
-
-		const result = conductor.conduct(viewOverThreshold);
-
-		// Must return an array (not null, not a group fallback)
-		expect(result).not.toBeNull();
-		expect(Array.isArray(result)).toBe(true);
-		const cmds = result!;
-
-		// CRITICAL: no group command must be emitted
-		const groupCmds = cmds.filter((cmd) => cmd.kind === "group");
-		expect(groupCmds).toHaveLength(0);
-
-		// CRITICAL: the existing LLM summary text must still be present on the head block
-		const replaceCmds = cmds.filter((cmd) => cmd.kind === "replace") as Array<{
-			id: string;
-			content: string;
-		}>;
-		const headReplace = replaceCmds.find((r) => r.content !== "");
-		expect(headReplace).toBeDefined();
-		expect(headReplace!.content).toContain(summaryText);
-
-		// No additional complete calls were made (model link was down)
-		expect(host.completeCalls).toHaveLength(1);
-	});
-
-	it("the summary text is preserved verbatim in the replace-set when degrade fires", async () => {
-		const { conductor, host, a0, a1, summaryText } = await setupWithSummary();
-
-		host.canComplete = false;
-
-		const newBlock = vb("new2", { order: 2, tokens: 5_000 });
-		const view = makeView([a0, a1, newBlock], [vb("tail0")], 100_000, 97_000);
-
-		const result = conductor.conduct(view);
-		expect(Array.isArray(result)).toBe(true);
-
-		const replaceCmds = (result! as Array<{ kind: string; id: string; content: string }>).filter(
-			(c) => c.kind === "replace",
-		);
-		const headReplace = replaceCmds.find((r) => r.content !== "");
-		expect(headReplace).toBeDefined();
-		expect(headReplace!.content).toContain(summaryText);
-	});
-
-	it("after model link recovers, the next conduct relaunches to pick up newly-aged blocks", async () => {
-		const { conductor, host, a0, a1 } = await setupWithSummary();
-
-		// Drop the link and exercise the degrade path
-		host.canComplete = false;
-		const newBlock = vb("new3", { order: 2, tokens: 2_000 });
-		const viewDegraded = makeView([a0, a1, newBlock], [vb("tail0")], 100_000, 96_000);
-		conductor.conduct(viewDegraded);
-		expect(host.completeCalls).toHaveLength(1); // no new launch while link is down
-
-		// Restore the link — next conduct should see newly-aged newBlock and relaunch
-		host.canComplete = true;
-		conductor.conduct(viewDegraded);
-		expect(host.completeCalls).toHaveLength(2); // second launch fired
-	});
-
-	it("when model link drops but liveTokens is below threshold, returns existing summary — no group", async () => {
-		const { conductor, host, a0, a1, summaryText } = await setupWithSummary();
-
-		host.canComplete = false;
-
-		// Under threshold — needSummary is false; conductor re-emits existing summary via buildCommands
-		const viewUnder = makeView([a0, a1], [vb("tail0")], 100_000, 50_000);
-		const result = conductor.conduct(viewUnder);
-
-		expect(Array.isArray(result)).toBe(true);
-		const cmds = result! as Array<{ kind: string; id: string; content: string }>;
-
-		// No group command
-		expect(cmds.filter((c) => c.kind === "group")).toHaveLength(0);
-
-		// Summary still on the head block
-		const headReplace = cmds.filter((c) => c.kind === "replace").find((r) => r.content !== "");
-		expect(headReplace).toBeDefined();
-		expect(headReplace!.content).toContain(summaryText);
+		// Second compaction fired: the group now also covers the newly-aged block, with the
+		// recursive summary. (Amnesia is exercised at the prompt level in the unit tests above.)
+		expect(callCount).toBe(2);
+		expect(s.groups.length).toBe(1);
+		const g2 = s.groups[0];
+		expect(s.groupSummary(g2)).toContain("SUMMARY 2");
+		expect(g2.memberIds).toContain("m3:p0");
 	});
 });

@@ -267,13 +267,16 @@ the conductor).
     [ADR 0010](docs/adr/0010-attention-conductor.md).
   - `garbage-collector/` — in-process. Reachability-based: mark-and-sweep from roots (protected tail + held + first `user` message) over entity/causal/message edges; folds unreachable blocks first, reachable ones only as a budget fallback. Collaborative, no instance state. See [ADR 0012](docs/adr/0012-garbage-collector-conductor.md).
   - `recency-folder/` — external (WS). Minimal wire-protocol starter example.
-  - `compaction-naive/` — in-process. Naive compaction baseline: summarizes aged context into
-    a prose blob via `host.complete`; lossy + recursive amnesia (each pass only reads the prior
-    summary). No fold tags — the agent cannot self-unfold. The intentional foil to reversible
-    folding. `replace` commands are emitted only for wire-foldable block kinds (`text`,
-    `thinking`, `tool_result`). `user` and `tool_call` blocks stay live; the host would clamp
-    them as `not-foldable`, but relying on that clamp could drop the summary head while other
-    empty replaces apply. See [ADR 0013](docs/adr/0013-conductor-host-capabilities.md) / [ADR 0014](docs/adr/0014-naive-compaction-conductor.md).
+  - `compaction-naive/` — in-process. Naive compaction baseline: when the visible window
+    crosses 90% of budget it calls `host.complete` to summarize the aged region into one prose
+    summary and collapses the whole region into a single `group(digest: summary)` — the same
+    shape sliding-window uses, but with an LLM summary digest instead of `null` (drop). Lossy
+    + recursive amnesia (each pass only reads the prior summary + newly-aged blocks; originals
+    already compressed are never re-read). No fold tags — the agent cannot self-unfold. The
+    intentional foil to reversible folding. All block kinds (incl. `user` and `tool_call`) are
+    swallowed by the group; the host's whole-message snap + pair-balance keeps the result
+    wire-valid. User messages are baked VERBATIM into the summary (Claude-Code `/compact`
+    style) so human intent survives compaction; only assistant reasoning degrades. See [ADR 0013](docs/adr/0013-conductor-host-capabilities.md) / [ADR 0014](docs/adr/0014-naive-compaction-conductor.md).
 
 ## Visual grammar (consistent across ALL views)
 
