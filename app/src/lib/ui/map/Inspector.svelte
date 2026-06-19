@@ -3,7 +3,6 @@
 	import { cubicOut } from "svelte/easing";
 	import type { AccordionStore } from "../../engine/store.svelte";
 	import type { Block, Group } from "../../engine/types";
-	import { groupDigest } from "$lib/engine/digest";
 	import Icon from "$lib/ui/Icon.svelte";
 
 	let {
@@ -80,7 +79,12 @@
 	const gSavedTok = $derived(group ? store.groupSavedTokens(group) : 0);
 	const gStrag = $derived(group ? store.groupStragglerCount(group) : 0);
 	const gIsDropGroup = $derived(group ? store.isDropGroup(group) : false);
-	const gDigest = $derived(group ? groupDigest(group, store.groupMembers(group)) : "");
+	// The EXACT summary the agent receives for this group: the conductor's custom digest
+	// (e.g. naive compaction's LLM summary) when present, else the deterministic structural
+	// recap. Mirrors the wire (`plan.ts` → `store.groupSummary`) so this "shown to agent"
+	// panel never diverges from what the agent actually sees. (Drop groups return ""; this
+	// derived is only rendered in the non-drop branch.)
+	const gDigest = $derived(group ? store.groupSummary(group) : "");
 	const gTurnFirst = $derived(gMembers.length > 0 ? gMembers[0].turn : 0);
 	const gTurnLast = $derived(gMembers.length > 0 ? gMembers[gMembers.length - 1].turn : 0);
 
