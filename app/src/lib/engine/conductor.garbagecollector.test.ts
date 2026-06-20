@@ -2,7 +2,7 @@
  * conductor.garbagecollector.test.ts — behavioural tests for
  * GarbageCollectorConductor (conductor-imaginarium.md, architecture #3).
  *
- * Two layers, mirroring conductor.autopilot.test.ts (direct `conduct()` calls with
+ * Two layers, mirroring conductor.slidingwindow.test.ts (direct `conduct()` calls with
  * synthetic views) and conductor.coldscore.test.ts (end-to-end through AccordionStore):
  *
  *   A. Direct: under-budget → []; budget guarantee; never folds forbidden blocks;

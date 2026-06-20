@@ -2,7 +2,7 @@
  * conductor.slidingwindow.test.ts — behavioural tests for SlidingWindowConductor.
  *
  * Driven directly against `conduct()` using synthetic `ConductorView` fixtures,
- * mirroring the pattern in conductor.autopilot.test.ts.
+ * mirroring the direct-call pattern used across the conductor tests.
  *
  * What we test:
  *   1. Under 90% of budget → returns [] (clear to raw).
