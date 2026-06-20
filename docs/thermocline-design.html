@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Thermocline v3 — a conductor design</title>
+<title>Thermocline v4 — a conductor design</title>
 <style>
   :root{
     --k-user:#6ea8fe; --k-text:#aab2c2; --k-thinking:#b483e0;
@@ -193,12 +193,13 @@
 
   <!-- HERO -->
   <div class="hero">
-    <div class="eyebrow">Conductor design · v3 · cold-score → cold-epoch → thermocline</div>
+    <div class="eyebrow">Conductor design · v4 · cold-score → cold-epoch → thermocline</div>
     <h1>Thermocline</h1>
-    <div class="tag">Attention-gated, <b style="color:#d3dae6">LLM-quality</b> compression with a <b style="color:#ffd9b0">hard budget floor</b>.
-      Deterministic compression keeps the agent under budget <i>synchronously, every turn</i>; LLM summaries upgrade the same
-      slots <i>in place</i>; nothing is immutable — so it never runs out of room.</div>
+    <div class="tag">Attention-gated, <b style="color:#d3dae6">LLM-quality</b> compression that moves in <b style="color:#ffd9b0">deliberate epochs</b>, not a constant trickle.
+      It starts preparing the next state early, decides the whole thing slowly and off to the side, then swaps it in <i>all at once</i> —
+      while a hard budget floor guarantees the agent never overflows.</div>
     <div class="chips">
+      <span class="chip"><b>updates</b> discrete atomic epochs</span>
       <span class="chip"><b>invariant</b> live ≤ budget, always</span>
       <span class="chip"><b>digests</b> LLM (host.complete), recoverable</span>
       <span class="chip"><b>signal</b> Qwen-0.5B attention</span>
@@ -212,14 +213,15 @@
     <div class="lab">what changed since v2 — two flaws you caught</div>
     <p style="margin:6px 0 0; color:#e7d2cf"><b>① The fold digest was mechanical and lossy</b> (the engine's per-kind stub, zero LLM) — and it lived in the
       <i>most-populated</i> layer. <b>② Immutable strata break the budget</b>: they only accumulate, so over a long session their sum alone
-      eventually exceeds the ceiling with no way to reclaim it. v3 is rebuilt around fixing both — and they turn out to share one keystone.</p>
+      eventually exceeds the ceiling with no way to reclaim it. The design is rebuilt around fixing both — and they turn out to share one keystone.</p>
   </div>
 
   <div class="callout green">
-    <div class="lab">the keystone that resolves both</div>
-    <p style="margin:6px 0 0; color:#bfe6d2"><b>Budget is enforced synchronously by <i>deterministic</i> compression; LLM calls only upgrade fidelity in place,
-      asynchronously.</b> The budget invariant never waits on a network call, and because nothing is immutable there is always a
-      token-reducing move available — so the conductor can <i>provably</i> return under budget on every single pass.</p>
+    <div class="lab">the keystone — prepare ahead, commit all at once</div>
+    <p style="margin:6px 0 0; color:#bfe6d2">Thermocline runs like <b>double-buffered graphics</b>: it computes the <i>entire</i> next state off to the side —
+      every fold decision and every LLM summary — while the agent keeps seeing the current, byte-stable state. When the whole next state is ready, it
+      <b>swaps in atomically, in one update</b>, and drops back under budget. Between swaps, nothing changes — no continuous compaction, no per-turn fiddling.
+      The budget guarantee survives because each epoch is started <i>early</i>, with one instant deterministic fallback for a sudden burst.</p>
   </div>
 
   <div class="toc">
@@ -239,14 +241,14 @@
   <!-- 01 BUDGET -->
   <h2 id="budget"><span class="sec-num">01</span>The budget invariant — the spine of the whole design</h2>
   <p class="lede">A conductor that can drift over budget is broken, full stop. Thermocline's first commitment, above relevance,
-    above cache, above everything: <b><code>projected live tokens ≤ budget</code>, on every pass, with no exceptions.</b> It earns
-    that the only way you can — by guaranteeing there is <i>always</i> a move that frees tokens, terminating in a hard delete.</p>
+    above cache, above everything: <b>the agent is never over budget.</b> It keeps that promise with deliberately-timed epochs — each one
+    started early and prepared off to the side — backed by a move that <i>always</i> frees space, terminating in a hard delete.</p>
 
   <div class="fig">
     <div class="stair">
       <div class="budgetline"><span>budget ceiling — never crossed</span></div>
-      <p style="font-size:12.5px; color:var(--faint); margin:0 0 12px; font-family:var(--mono)">while projected &gt; budget: apply the
-        cheapest move that still frees enough, then re-check ↓</p>
+      <p style="font-size:12.5px; color:var(--faint); margin:0 0 12px; font-family:var(--mono)">to plan an epoch's target: walk down until
+        the projected state fits, composing the cheapest moves first ↓</p>
 
       <div class="rung"><div class="n" style="background:var(--k-text)">1</div>
         <div class="b"><div class="t">Deepen the coldest active unit &nbsp;<span style="color:var(--cool); font-weight:400">Full → Trim → Digest</span></div>
@@ -255,7 +257,7 @@
 
       <div class="rung"><div class="n" style="background:var(--group-accent)">2</div>
         <div class="b"><div class="t">Graduate a double-gated cold run &nbsp;<span style="color:var(--group-accent); font-weight:400">→ new Stratum</span></div>
-          <div class="d">Deep compression of a contiguous cold run. Deterministic recap applies now; the holistic LLM summary upgrades in place.</div></div>
+          <div class="d">Deep compression of a contiguous cold run into one holistic LLM summary, committed with its epoch (deterministic recap only as the emergency stand-in).</div></div>
         <div class="cost">rare · gated</div></div>
 
       <div class="rung"><div class="n" style="background:#9c6b43">3</div>
@@ -278,15 +280,35 @@
     <div class="card">
       <h3 style="margin-top:0">Attention decides <i>order</i>; budget decides <i>depth</i></h3>
       <p>The same split the garbage-collector conductor uses (signal picks priority, budget picks how far to go). Attention spares
-        the still-used content <i>longest</i> at every rung; the budget invariant decides how deep the ladder must descend this turn.
+        the still-used content <i>longest</i>; the budget invariant decides how deep the next epoch must reach.
         Relevance never overrides the ceiling — it only orders who gets compressed first.</p>
     </div>
     <div class="card">
-      <h3 style="margin-top:0">The invariant never waits on the network</h3>
-      <p>Each rung's <b>deterministic</b> form (Trim, recap, drop) frees its tokens <i>synchronously</i> inside <code>conduct()</code>.
-        The LLM call is fired off-path and, when it lands, <b>replaces the same slot</b> with a better summary of equal-or-smaller size.
-        So an LLM outage, a 2-minute completion, a cold probe — none of them can push the agent over budget.</p>
+      <h3 style="margin-top:0">Anticipatory epochs, one instant safety epoch</h3>
+      <p>A planned epoch starts <b>early</b> (around eighty percent full), so its slow LLM work finishes before the ceiling. If a sudden
+        burst would breach budget before the planned epoch is ready, a <b>deterministic emergency epoch</b> applies instantly — one atomic,
+        mechanical compression, no LLM, no waiting — and the high-quality epoch still swaps in afterward. That instant fallback is the
+        <i>only</i> reactive move, and it is what keeps "never over budget" a guarantee rather than a hope.</p>
     </div>
+  </div>
+
+  <div class="fig">
+    <div class="pipe">
+      <div class="stage"><div class="s-h"><span class="pill-kind" style="background:var(--cool)"></span>HOLD</div>
+        <div class="s-d">Steady, byte-stable applied state, re-sent unchanged each turn. Cache warm. No actions.</div></div>
+      <div class="arrow">→</div>
+      <div class="stage"><div class="s-h"><span class="pill-kind" style="background:var(--warn)"></span>PREPARE · early</div>
+        <div class="s-d">Cross ~80%: compute the <b>whole</b> next target off to the side and fire <b>every</b> LLM summary in parallel. Visible state unchanged.</div></div>
+      <div class="arrow">→</div>
+      <div class="stage"><div class="s-h"><span class="pill-kind" style="background:var(--ok)"></span>READY</div>
+        <div class="s-d">All summaries returned. The complete next state sits assembled in the back buffer.</div></div>
+      <div class="arrow">→</div>
+      <div class="stage" style="border-color:var(--accent-dim)"><div class="s-h"><span class="pill-kind" style="background:var(--accent)"></span>COMMIT · atomic</div>
+        <div class="s-d">Swap in all at once — one update, drop to low-water, one deliberate cache miss. → back to HOLD.</div></div>
+    </div>
+    <div class="cap"><b>Double-buffered.</b> The agent only ever sees a finished, stable state; the slow LLM work happens during PREPARE while the old state
+      holds — so an epoch is felt as a single clean transition, never a trickle. <b>EMERGENCY</b> (rare): if a burst outruns PREPARE, a deterministic
+      epoch commits instantly to hold the line, and the planned epoch still lands after.</div>
   </div>
 
   <!-- 02 PARENTS -->
@@ -333,8 +355,8 @@
     </div>
     <div class="step">
       <div class="lvl" style="color:var(--k-text)">Digest<small>L2 · reversible</small></div>
-      <div class="desc"><b>A faithful 1–3 line LLM summary of the unit</b> via <code>host.complete</code> — content-hash cached, async, upgrades the
-        Trim slot in place when it lands. The fix: the most-populated layer is now LLM-quality, not a stub.</div>
+      <div class="desc"><b>A faithful 1–3 line LLM summary of the unit</b> via <code>host.complete</code> — content-hash cached. Written during an epoch's
+        PREPARE phase and committed with it; Trim stands in only for an emergency epoch. The fix: the most-populated layer is now LLM-quality, not a stub.</div>
       <div class="meta">
         <div class="row"><span class="dot" style="background:var(--ok)"></span> agent unfold + recall</div>
         <div class="row"><span class="dot" style="background:var(--group-accent)"></span> LLM · cached forever</div></div>
@@ -451,8 +473,8 @@
       <div class="node"><div class="nh">⇢ host.complete (agent's model)</div>
         <div class="nd">Per-unit L2 digests (cached) + per-run L3 summaries + rare L4 merges. All async, off the model-call path, fidelity-only.</div></div>
     </div>
-    <div class="cap"><b>Bandwidth</b> — L2 digest calls are one-per-unit, content-hash-cached forever, drained at a small concurrency limit. The budget is met
-      by deterministic compression before any of them return, so the queue depth never affects correctness — only how fast quality improves.</div>
+    <div class="cap"><b>Bandwidth</b> — L2 digest calls are one-per-unit, content-hash-cached forever. An epoch commits only once <i>all</i> its summaries are back,
+      so the queue depth sets how long PREPARE takes — not whether the budget holds. A burst that outruns PREPARE is caught by the instant emergency epoch.</div>
   </div>
 
   <!-- 07 GOV -->
@@ -472,7 +494,7 @@
   <!-- 08 BEATS -->
   <h2 id="beats"><span class="sec-num">08</span>How it stands against each parent</h2>
   <table>
-    <thead><tr><th>property</th><th>attention-folder</th><th>compaction-naive</th><th>Thermocline v3</th></tr></thead>
+    <thead><tr><th>property</th><th>attention-folder</th><th>compaction-naive</th><th>Thermocline v4</th></tr></thead>
     <tbody>
       <tr><td>stays under budget always</td><td class="mid">until folds exhaust</td><td class="yes">yes</td><td class="yes">yes — drop-floor guarantee</td></tr>
       <tr><td>intermediate digest quality</td><td class="no">mechanical stub</td><td>—</td><td class="yes">LLM, cached, recoverable</td></tr>
@@ -489,6 +511,8 @@
   <!-- 09 EVO -->
   <h2 id="evo"><span class="sec-num">09</span>Design evolution</h2>
   <div class="evo">
+    <div class="row"><div class="from"><div class="lab">v3 · churn</div>Budget was enforced every pass, but LLM summaries landed one at a time — each a separate visible change. That's continuous action: a trickle of little cache misses, exactly the texture to avoid.</div>
+      <div class="mid">→</div><div class="to"><div class="lab">v4 · epochs</div><b>Double-buffered.</b> Prepare the entire next state (every summary) off to the side while holding steady, then commit atomically in one update. Anticipatory timing + one instant deterministic emergency epoch keep the budget guarantee hard.</div></div>
     <div class="row"><div class="from"><div class="lab">v2 · broke</div>Probation layer folded to the engine's mechanical per-kind stub. Highly lossy, zero LLM, in the most-populated layer.</div>
       <div class="mid">→</div><div class="to"><div class="lab">v3 · fixed</div><b>LLM digests at L2</b> (content-hash cached, async upgrade-in-place), Trim as the deterministic placeholder/fallback. Verified recoverable with the existing tag mechanic.</div></div>
     <div class="row"><div class="from"><div class="lab">v2 · broke</div>Immutable append-only strata. Accumulate without bound → eventually exceed budget with no reclaim. A category error.</div>
@@ -507,38 +531,44 @@
       <div class="x">The probe's recency/cross-window bias skews <i>which</i> cold content blurs first toward old, far-from-tail blocks. The double gate, ever-warm 2K, and recall reduce — not eliminate — this.</div></div></div>
     <div class="risk"><div class="sev"><span class="badge warn">moderate</span></div><div class="body"><div class="t">LLM digest spend &amp; latency</div>
       <div class="x">One cached call per folded unit plus per-stratum summaries. Off-path and budget-independent, but real cost and a quality lag (the deterministic form shows until the LLM lands).</div></div></div>
-    <div class="risk"><div class="sev"><span class="badge warn">moderate</span></div><div class="body"><div class="t">Deep-merge cache flushes</div>
-      <div class="x">Re-compressing ancient strata changes the front region → a cache miss. Rare by construction (the zone changes slowly), but it's the honest cost of not being immutable.</div></div></div>
+    <div class="risk"><div class="sev"><span class="badge warn">moderate</span></div><div class="body"><div class="t">Each epoch commit is a cache miss</div>
+      <div class="x">A commit changes the context, so the prompt cache rebuilds from that point. Epochs are deliberately infrequent (one clean miss each) — far better than a per-turn trickle — but a burst that triggers the emergency epoch spends an extra one.</div></div></div>
     <div class="risk"><div class="sev"><span class="badge good">minor</span></div><div class="body"><div class="t">Guarantee bottoms at the tail floor</div>
       <div class="x">If the human sets budget below "protected tail + one minimal stratum," no conductor can comply — that's the budget/tail dials (human-owned, never lockable), not Thermocline.</div></div></div>
   </div>
 
   <!-- 11 SPEC -->
   <h2 id="spec"><span class="sec-num">11</span>Spec appendix</h2>
-  <h3>conduct() — budget-first, LLM-async</h3>
-  <pre><span class="k">fun</span> <span class="f">onUpdate</span>(view):
-  prune(state); units = buildUnits(view.blocks); cap = min(view.budget, view.contextWindow)
+  <h3>conduct() — epoch-based, double-buffered</h3>
+  <pre><span class="c">// double buffer: what the agent sees now, and the next state being prepared off to the side</span>
+state = { applied, prepared: <span class="k">null</span>, preparing: <span class="k">false</span> }
 
-  <span class="c">// ── 1. ENFORCE THE INVARIANT synchronously, with deterministic compression ──</span>
-  <span class="k">while</span> project(view, state) &gt; cap:                 <span class="hl">// guaranteed to terminate</span>
-     m = nextMove(view, state)                       <span class="c">// ladder §01, cheapest sufficient:</span>
-     <span class="c">//  1 deepen coldest active unit (Trim/stub NOW)   2 graduate gated cold run (recap NOW)</span>
-     <span class="c">//  3 deepZone&gt;D ? merge oldest strata             4 floor: drop oldest stratum (group null)</span>
-     <span class="k">if</span> m == none: <span class="k">break</span>                          <span class="c">// only at the protected-tail floor</span>
-     apply(m)
+<span class="k">fun</span> <span class="f">onUpdate</span>(view):                       <span class="c">// called each turn — usually just re-sends</span>
+  cap  = min(view.budget, view.contextWindow)
+  fill = project(view, state.applied)        <span class="c">// tokens under the CURRENT applied state</span>
 
-  <span class="c">// ── 2. UPGRADE FIDELITY asynchronously (never blocks, never exceeds budget) ──</span>
-  <span class="k">for</span> u <span class="k">in</span> foldedWithoutLLMDigest(state):
-     <span class="k">if</span> host.can(<span class="s">"complete"</span>) &amp;&amp; !cache.has(hash(u.text)) &amp;&amp; queue.depth &lt; LIMIT:
-        host.complete({system: DIGEST_SYS, prompt: u.text})
-          .then(s =&gt; { cache.set(hash(u.text), tag(u.id)+s); requestRerun() })   <span class="c">// in-place, ≤ same size</span>
-  launchStratumSummary(newlyGraduatedRun)            <span class="c">// holistic, async, same pattern</span>
+  <span class="c">// 1 · ANTICIPATE — begin preparing the next epoch EARLY, off to the side</span>
+  <span class="k">if</span> fill &gt;= warmWater·cap &amp;&amp; !state.preparing &amp;&amp; needNewEpoch():
+     state.preparing = <span class="k">true</span>
+     target = planEpoch(view)                <span class="c">// run the §01 ladder to a target set (down to low-water)</span>
+     fireEverySummary(target)                <span class="c">// all LLM digests + stratum summaries, in parallel</span>
+        .allSettled().then(() =&gt; { state.prepared = assemble(target); requestRerun() })
 
-  scheduleRescore(project(view,state) &gt;= warmWater·cap)
-  <span class="k">return</span> emit(state)   <span class="c">// fold(ids, llmDigestOrTrim+tag) · group(run, summaryOrRecap) · group(oldest, null)</span></pre>
+  <span class="c">// 2 · COMMIT — swap the WHOLE next state in atomically, once it is fully ready</span>
+  <span class="k">if</span> state.prepared:
+     state.applied = state.prepared; state.prepared = <span class="k">null</span>; state.preparing = <span class="k">false</span>
+     <span class="k">return</span> emit(state.applied)            <span class="hl">// ONE atomic swap → under budget, one cache miss</span>
+
+  <span class="c">// 3 · SAFETY — instant deterministic epoch if a burst would breach before prepared is ready</span>
+  <span class="k">if</span> fill &gt; cap:
+     state.applied = planEpoch(view).deterministic()   <span class="c">// mechanical, no LLM, atomic; LLM epoch still lands later</span>
+     <span class="k">return</span> emit(state.applied)
+
+  <span class="c">// 4 · HOLD — re-send the identical applied state (byte-stable, cache warm)</span>
+  <span class="k">return</span> emit(state.applied)</pre>
   <p class="footnote"><code>project()</code> = <code>liveTokens − Σ folded(tokens−foldedTokens) − Σ strata(tokens−summaryShare)</code>, from explicit
     <code>foldedIds</code>/<code>strata</code> sets (no view-flag inference). <code>tag(id)</code> = <code>{#${'{'}foldCode(id){'}'} FOLDED}</code>, so every
-    LLM digest stays unfold/recall-able. On an LLM resolve, any unit the agent recalled/unfolded mid-flight is dropped before the slot is written.</p>
+    LLM digest stays unfold/recall-able. <code>assemble()</code> reconciles against reality at commit time — any unit the agent recalled, unfolded, or re-warmed during PREPARE is dropped from the epoch before it is swapped in.</p>
 
   <div class="grid g2">
     <div class="card"><h3 style="margin-top:0">Key state</h3>
@@ -560,7 +590,7 @@
   </div>
 
   <div class="rule" style="margin-top:40px"></div>
-  <p class="footnote" style="margin-top:18px">Thermocline v3 · attention-gated LLM compression under a hard budget invariant · design proposal for the Accordion conductor
+  <p class="footnote" style="margin-top:18px">Thermocline v4 · attention-gated LLM compression in deliberate epochs under a hard budget invariant · design proposal for the Accordion conductor
     framework. Parents: <code>conductors/attention-folder</code> (ADR 0010) × <code>conductors/compaction-naive</code> (ADR 0014). Contract:
     <code>conductors/contract</code> · ADR 0007/0011/0013. Recoverable-LLM-digest + recall-from-originals verified against the live engine; no platform change required. Not yet implemented.</p>
 </div>
