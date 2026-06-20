@@ -21,8 +21,9 @@ import type { Conductor, ConductorView, ConductorBlockKind, Command } from "../c
 /**
  * Lower value → folded sooner. The whole asymmetry the tool is built around. (Was a
  * private const in `store.svelte.ts`; it is the built-in's strategy, so it lives here.)
+ * Exported so siblings (e.g. garbage-collector) can share the same ordering without copying.
  */
-const FOLD_RANK: Record<ConductorBlockKind, number> = {
+export const FOLD_RANK: Record<ConductorBlockKind, number> = {
 	tool_result: 0, // huge, decays fastest → fold first, hardest
 	thinking: 1, // ephemeral reasoning
 	text: 2, // conclusions, medium durable value

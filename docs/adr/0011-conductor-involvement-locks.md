@@ -204,7 +204,7 @@ and **detach**.
 `PROTECT_RECENT_MSGS = 2` constant on the live-WS path (`app/src/lib/live/mapping.ts`):
 `applyPlan` refused to fold the newest ~2 messages regardless of the plan, as a coarse
 defence-in-depth guard. The `tail-size` lock turned that into a real **view↔wire divergence**:
-a `tailTokens = 0` conductor (e.g. the shipped Autopilot) folds recent content in the engine
+a `tailTokens = 0` conductor (an exclusive conductor holding the `tail-size` lock) folds recent content in the engine
 and `computeFoldOps`/`computeGroupOps` emit those ops, but the position backstop silently kept
 the newest two messages whole on the wire — so the GUI counted a saving the agent never
 received. That is "a stricter rule on the wire than in the view", which this repo forbids, and

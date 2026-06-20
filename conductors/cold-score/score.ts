@@ -29,6 +29,13 @@
  */
 import type { ViewBlock } from "../contract";
 
+/** Kinds that may be folded to a digest — `tool_call` / `user` are never folded. */
+export const FOLDABLE_KINDS: ReadonlySet<ViewBlock["kind"]> = new Set<ViewBlock["kind"]>([
+	"text",
+	"thinking",
+	"tool_result",
+]);
+
 export interface ScoreCtx {
 	/** The current turn number (highest turn in the session). */
 	currentTurn: number;
