@@ -25,7 +25,6 @@ import type { ConductorEntry } from "./registry";
 import {
 	CONDUCTOR_PROTOCOL_VERSION,
 	LOCK_NAMES,
-	isHostMessage, // (re-exported for symmetry/tests; host parses conductor msgs)
 	isConductorMessage,
 	type Conductor,
 	type ConductorHost,
@@ -37,8 +36,6 @@ import {
 	type ContextUpdateMessage,
 	type LockName,
 } from "$conductors/contract";
-
-void isHostMessage; // referenced to keep the import meaningful for downstream consumers
 
 /** The well-known id of the in-process default conductor. */
 export const BUILTIN_ID = "builtin";
@@ -311,9 +308,9 @@ export class RemoteRunner implements Conductor {
 	/**
 	 * Answer a capability request from the remote conductor (the host owns the engine + tokenizer).
 	 *
-	 * Synchronous capabilities ("countTokens", "getContent", "summarize", "getDigest") reply
-	 * inline. The async "complete" capability is handled in its own async IIFE so it never
-	 * blocks the synchronous dispatch of the other cases; the existing sync paths are unchanged.
+	 * Synchronous capabilities ("countTokens", "getContent", "getDigest") reply inline.
+	 * The async "complete" capability is handled in its own async IIFE so it never blocks
+	 * the synchronous dispatch of the other cases; the existing sync paths are unchanged.
 	 *
 	 * "complete" proxies through the SAME `host.complete()` that an in-process conductor uses —
 	 * the WS is merely a transport for the same capability. The remote process calls
@@ -377,14 +374,6 @@ export class RemoteRunner implements Conductor {
 				if (b) value = b.text;
 				else ((ok = false), (error = `no block ${id}`));
 				break;
-			case "summarize": {
-				// A group head (id `g:…`) summarizes to the group recap; a plain block to its digest.
-				const g = id ? this.store.groupById(id) : undefined;
-				if (g) value = this.store.groupSummary(g);
-				else if (b) value = digest(b);
-				else ((ok = false), (error = `no block ${id}`));
-				break;
-			}
 			case "getDigest":
 				if (b) value = digest(b);
 				else ((ok = false), (error = `no block ${id}`));

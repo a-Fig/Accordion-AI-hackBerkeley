@@ -46,8 +46,9 @@
  */
 
 import type { Conductor, ConductorView, ViewBlock, Command } from "../contract";
-import { sortCandidates, type ScoreCtx } from "../cold-score/score";
+import { sortCandidates, FOLDABLE_KINDS, type ScoreCtx } from "../cold-score/score";
 import { extractIdentifiers, matchBlocks } from "../cold-score/lexical";
+import { buildTailText, currentTurn } from "../cold-score/cold-score";
 
 /** The hysteresis band as fractions of the effective cap (min of budget and contextWindow). */
 export const EPOCH_CFG = {
@@ -58,15 +59,6 @@ export const EPOCH_CFG = {
 /** Warmth-scan hysteresis — mirrors cold-score's rate-limiting of recall accumulation. */
 const WARMTH_COOLDOWN_TURNS = 5;
 const MAX_WARMTH_RECORDS_PER_TURN = 4;
-
-/** Kinds that may be folded (mirrors cold-score and attention-folder). */
-const FOLDABLE_KINDS: ReadonlySet<ViewBlock["kind"]> = new Set<ViewBlock["kind"]>([
-	"text",
-	"thinking",
-	"tool_result",
-]);
-
-const TAIL_TEXT_CAP = 32_000;
 
 export class ColdEpochConductor implements Conductor {
 	readonly id = "cold-epoch";
@@ -199,22 +191,4 @@ function projectedLive(view: ConductorView, foldSet: Set<string>): number {
 		if (foldSet.has(b.id) && !b.folded) live += b.foldedTokens - b.tokens;
 	}
 	return live;
-}
-
-/** Concatenate protected-tail text, newest-first, capped at ~32k chars. */
-function buildTailText(blocks: ViewBlock[]): string {
-	let text = "";
-	for (let i = blocks.length - 1; i >= 0 && text.length < TAIL_TEXT_CAP; i--) {
-		const b = blocks[i];
-		if (!b.protected) break;
-		if (b.text !== undefined) text = b.text + "\n" + text;
-	}
-	return text;
-}
-
-/** Highest turn number across all blocks (0 for an empty session). */
-function currentTurn(blocks: ViewBlock[]): number {
-	let t = 0;
-	for (const b of blocks) if (b.turn > t) t = b.turn;
-	return t;
 }

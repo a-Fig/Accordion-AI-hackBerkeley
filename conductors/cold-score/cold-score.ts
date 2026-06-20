@@ -33,7 +33,7 @@
  * types only from `../contract`.
  */
 import type { Conductor, ConductorView, ViewBlock, Command } from "../contract";
-import { sortCandidates, type ScoreCtx } from "./score";
+import { sortCandidates, FOLDABLE_KINDS, type ScoreCtx } from "./score";
 import { extractIdentifiers, matchBlocks } from "./lexical";
 
 /**
@@ -50,13 +50,6 @@ export const HYSTERESIS = {
 	unfoldCooldownTurns: 5,
 	maxLexicalUnfoldsPerPass: 4,
 };
-
-/** Kinds that may be folded to a digest — tool_call / user are never folded. */
-const FOLDABLE_KINDS: ReadonlySet<ViewBlock["kind"]> = new Set<ViewBlock["kind"]>([
-	"text",
-	"thinking",
-	"tool_result",
-]);
 
 /** Cap on the tail text scanned for identifiers (mirrors PR #19's 32k-char window). */
 const TAIL_TEXT_CAP = 32_000;
@@ -160,7 +153,7 @@ export class ColdScoreConductor implements Conductor {
 		// under budget pressure, and a re-folded block must not carry warmth. The persistent
 		// bookkeeping is deferred until AFTER the final fold set is known (see end of pass).
 		const preUnfolded = new Set<string>();
-		const tailText = this.buildTailText(view.blocks);
+		const tailText = buildTailText(view.blocks);
 		const tailIds = extractIdentifiers(tailText);
 		const lexCandidates = candidates.filter((b) => folded.has(b.id));
 		if (tailIds.size > 0 && lexCandidates.length > 0) {
@@ -226,19 +219,21 @@ export class ColdScoreConductor implements Conductor {
 		return [{ kind: "fold", ids: foldIds }];
 	}
 
-	/**
-	 * Concatenate the protected-tail text, newest-walking, capped at ~32k chars — the
-	 * identifier source for the lexical pre-unfold. Mirrors PR #19's tail-text window.
-	 */
-	private buildTailText(blocks: ViewBlock[]): string {
-		let text = "";
-		for (let i = blocks.length - 1; i >= 0 && text.length < TAIL_TEXT_CAP; i--) {
-			const b = blocks[i];
-			if (!b.protected) break; // walked past the protected tail
-			if (b.text !== undefined) text = b.text + "\n" + text;
-		}
-		return text;
+}
+
+/**
+ * Concatenate the protected-tail text, newest-walking, capped at ~32k chars — the
+ * identifier source for the lexical pre-unfold. Mirrors PR #19's tail-text window.
+ * Exported so cold-epoch can share the same tail-text builder without copying.
+ */
+export function buildTailText(blocks: ViewBlock[]): string {
+	let text = "";
+	for (let i = blocks.length - 1; i >= 0 && text.length < TAIL_TEXT_CAP; i--) {
+		const b = blocks[i];
+		if (!b.protected) break; // walked past the protected tail
+		if (b.text !== undefined) text = b.text + "\n" + text;
 	}
+	return text;
 }
 
 /**
@@ -246,8 +241,9 @@ export class ColdScoreConductor implements Conductor {
  * session). Deliberately the max, not the last block's turn: robust to a resync that appends
  * an older-turn block. PR #19's runtime used the last block's turn, which coincides with the
  * max whenever turns are monotonic (the normal case).
+ * Exported so cold-epoch (and any future conductor) can share the same definition.
  */
-function currentTurn(blocks: ViewBlock[]): number {
+export function currentTurn(blocks: ViewBlock[]): number {
 	let t = 0;
 	for (const b of blocks) if (b.turn > t) t = b.turn;
 	return t;

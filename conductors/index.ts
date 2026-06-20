@@ -14,7 +14,6 @@ import { BuiltinConductor } from "./builtin/builtin";
 import { ColdScoreConductor } from "./cold-score/cold-score";
 import { ColdEpochConductor } from "./cold-epoch/cold-epoch";
 import { SlidingWindowConductor } from "./sliding-window/sliding-window";
-import { AutopilotConductor } from "./autopilot/autopilot";
 import { GarbageCollectorConductor } from "./garbage-collector/garbage-collector";
 import { NaiveCompactionConductor } from "./compaction-naive/compaction-naive";
 import type { Conductor, LockName } from "./contract";
@@ -23,7 +22,6 @@ export { BuiltinConductor } from "./builtin/builtin";
 export { ColdScoreConductor } from "./cold-score/cold-score";
 export { ColdEpochConductor } from "./cold-epoch/cold-epoch";
 export { SlidingWindowConductor } from "./sliding-window/sliding-window";
-export { AutopilotConductor } from "./autopilot/autopilot";
 export { GarbageCollectorConductor } from "./garbage-collector/garbage-collector";
 export { NaiveCompactionConductor } from "./compaction-naive/compaction-naive";
 
@@ -47,12 +45,6 @@ export const IN_PROCESS_CONDUCTORS: InProcessConductor[] = [
   { id: "cold-score", label: "Cold-score", create: () => new ColdScoreConductor() },
   { id: "cold-epoch", label: "Cold epoch", create: () => new ColdEpochConductor() },
   { id: "sliding-window", label: "Sliding window", locks: ["human-steering", "agent-unfold"], create: () => new SlidingWindowConductor() },
-  {
-    id: "autopilot",
-    label: "Autopilot",
-    locks: ["human-steering", "agent-unfold", "tail-size"],
-    create: () => new AutopilotConductor(),
-  },
   { id: "garbage-collector", label: "Garbage collector", create: () => new GarbageCollectorConductor() },
   {
     id: "compaction-naive",
