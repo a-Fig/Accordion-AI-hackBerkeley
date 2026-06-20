@@ -5,9 +5,9 @@ clean quality gate. For *what* the product is, read [VISION.md](VISION.md); for 
 the code is organized and the conventions to follow*, read [CLAUDE.md](CLAUDE.md) — it
 is the authoritative guide to working in this codebase.
 
-The active surface is the desktop app in **`app/`** (Tauri 2 + SvelteKit) and the pi
-extension in **`extension/`** (the live link). The repo-root `src/` and `visualizer/`
-are older POCs — not the focus.
+The active surface is the desktop app in **`app/`** (Tauri 2 + SvelteKit), the pi
+extension in **`extension/`** (the live link), and the conductor strategies in
+**`conductors/`**.
 
 ---
 

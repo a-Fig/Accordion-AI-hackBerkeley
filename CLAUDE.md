@@ -25,9 +25,7 @@ The old **Classic** view (summary/timeline of `BlockCard`s) and the earlier 3-wa
 (`ContextSummary` / `ContextTimeline` / `Timeline` / `BlockCard`) and `chains.ts` are gone.
 
 The current pi extension is **`extension/accordion.ts`** (the live link — see below).
-`src/` (repo root) and `visualizer/` are the *older* pi-extension POC and the
-standalone HTML visualizer — not the focus; touch only if asked. Don't confuse
-`src/accordion.ts` (old POC) with `extension/accordion.ts` (current).
+The old root `src/` POC and `visualizer/` have been removed from the repo.
 
 ## The engine is the source of truth — use it, don't change it
 
