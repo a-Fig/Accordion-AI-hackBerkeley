@@ -12,7 +12,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
-import { CONDUCTOR_PROTOCOL_VERSION } from "../contract/protocol.ts";
+
+// Inlined literal (not imported from the .ts contract) so the smoke test runs under plain
+// `node` on any version — see the note in tiered-relevance.mjs.
+const CONDUCTOR_PROTOCOL_VERSION = 3;
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PORT = 7799;

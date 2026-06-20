@@ -42,7 +42,14 @@ import { RelevanceEngine, createEmbeddingProvider, EMBEDDING_MODEL } from "./rel
 import { Summarizer, detectChatProvider } from "./summaries.mjs";
 import { deterministicDigest } from "./digest.mjs";
 import { buildFoldUnits } from "./units.mjs";
-import { CONDUCTOR_PROTOCOL_VERSION } from "../contract/protocol.ts";
+
+// Mirrors CONDUCTOR_PROTOCOL_VERSION in conductors/contract/protocol.ts. Inlined as a literal
+// (not imported) so the conductor runs under plain `node` on any version: importing the .ts
+// contract requires TypeScript type-stripping, unflagged only since Node 22.18 / 23.6 — on
+// older Node an import of a .ts file throws ERR_UNKNOWN_FILE_EXTENSION at load. The peer
+// conductors (recency-folder, attention-folder) inline it the same way. Keep in lockstep with
+// the contract on any protocol bump.
+const CONDUCTOR_PROTOCOL_VERSION = 3;
 
 const ID = "tiered-relevance";
 const LABEL = "Tiered relevance";
