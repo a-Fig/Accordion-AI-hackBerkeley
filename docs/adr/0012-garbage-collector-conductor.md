@@ -43,7 +43,7 @@ the budget decides *how far to go*.
 ### 1. A third collaborative in-process conductor, additive
 
 `GarbageCollectorConductor` (`id: "garbage-collector"`) is registered alongside the
-built-in, cold-score, cold-epoch, sliding-window, and autopilot conductors in
+built-in, cold-score, cold-epoch, and sliding-window conductors in
 `IN_PROCESS_CONDUCTORS` (`conductors/index.ts`). It is **collaborative** — it declares no
 involvement locks (ADR 0011): reachability is a relevance signal, not a claim of
 authority, and human overrides win exactly as they do for the built-in and cold-score.
