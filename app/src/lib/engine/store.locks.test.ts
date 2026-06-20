@@ -1,9 +1,31 @@
 import { describe, it, expect } from "vitest";
 import { AccordionStore } from "./store.svelte";
-import { AutopilotConductor } from "$conductors/autopilot/autopilot";
 import type { Conductor, ConductorView, Command, LockName } from "$conductors/contract";
 import type { Block, ParsedSession } from "./types";
 import { wireFoldable } from "./digest";
+
+/** Minimal stand-in for the (deleted) AutopilotConductor: full-exclusive, oldest-first fold. */
+class AutopilotStub implements Conductor {
+	readonly id = "autopilot";
+	readonly label = "Autopilot";
+	readonly locks = ["human-steering", "agent-unfold", "tail-size"] as const;
+	// tailTokens omitted → 0 (no protected tail; the conductor owns the whole context)
+	conduct(view: ConductorView): Command[] {
+		const FOLD_RANK: Record<string, number> = { tool_result: 0, thinking: 1, text: 2, tool_call: 3, user: 4 };
+		let live = view.liveTokens;
+		if (live <= view.budget) return [];
+		const cand = view.blocks
+			.filter((b) => !b.held && !b.protected && !b.grouped && b.foldedTokens < b.tokens)
+			.sort((a, b) => (FOLD_RANK[a.kind] ?? 99) - (FOLD_RANK[b.kind] ?? 99) || a.order - b.order);
+		const ids: string[] = [];
+		for (const b of cand) {
+			if (live <= view.budget) break;
+			ids.push(b.id);
+			live += b.foldedTokens - b.tokens;
+		}
+		return ids.length ? [{ kind: "fold", ids }] : [];
+	}
+}
 
 /*
  * ADR 0011 — conductor involvement locks (HOST ENFORCEMENT).
@@ -508,7 +530,7 @@ describe("ADR 0011 — detach inherits the conductor's tail — no snap-back, vi
 		s.setProtect(20_000); // human would protect the whole session collaboratively
 		s.setBudget(8_000); // far below the 30k live → Autopilot must fold several blocks
 
-		s.attach(new AutopilotConductor());
+		s.attach(new AutopilotStub());
 		// Under tail-size the host uses activeTailTokens=0 → no protected tail for the conductor.
 		const foldedIds = s.blocks.filter((b) => s.isFolded(b)).map((b) => b.id);
 		expect(foldedIds.length).toBeGreaterThan(0);

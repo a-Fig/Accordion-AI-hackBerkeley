@@ -41,29 +41,10 @@
  * results die young, survivors live long) is deliberately OUT OF SCOPE for this cut;
  * see ADR 0012 for the roadmap. This is plain mark-and-sweep, the worked first slice.
  */
-import type { Conductor, ConductorView, ViewBlock, ConductorBlockKind, Command } from "../contract";
+import type { Conductor, ConductorView, ViewBlock, Command } from "../contract";
 import { buildGraph, markReachable } from "./edges";
-
-/** Kinds that may be folded to a digest — `tool_call` / `user` are never folded. */
-const FOLDABLE_KINDS: ReadonlySet<ViewBlock["kind"]> = new Set<ViewBlock["kind"]>([
-	"text",
-	"thinking",
-	"tool_result",
-]);
-
-/**
- * Lower value → folded sooner WITHIN a reachability tier. Mirrors the built-in's
- * FOLD_RANK so the fallback (reachable) tier behaves like the built-in when the GC
- * signal is absent — tool_results before thinking before reply text. `tool_call` /
- * `user` are listed for completeness but are never candidates (see FOLDABLE_KINDS).
- */
-const FOLD_RANK: Record<ConductorBlockKind, number> = {
-	tool_result: 0, // huge, decays fastest → fold first, hardest
-	thinking: 1, // ephemeral reasoning
-	text: 2, // conclusions, medium durable value
-	tool_call: 3, // tiny + durable record of an action → fold last
-	user: 4, // the instruction/intent → fold last of all
-};
+import { FOLDABLE_KINDS } from "../cold-score/score";
+import { FOLD_RANK } from "../builtin/builtin";
 
 export class GarbageCollectorConductor implements Conductor {
 	readonly id = "garbage-collector";

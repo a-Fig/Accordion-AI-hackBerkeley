@@ -157,7 +157,6 @@ export interface ConductorCommandsMessage {
 /**
  * Ask the host to do something only it can (it owns the engine + tokenizer + model
  * link). The host answers with a `cap/result` carrying the same `reqId`.
- *  - "summarize"   — engine digest for `ids` (a single block, or a group head).
  *  - "countTokens" — token estimate for `text`.
  *  - "getContent"  — full text of block `ids[0]` (for `wants:"onDemand"`).
  *  - "getDigest"   — the engine's per-kind folded digest for block `ids[0]` (incl. the {#code FOLDED} tag).
@@ -175,7 +174,7 @@ export interface ConductorCommandsMessage {
 export interface CapRequestMessage {
 	type: "cap/request";
 	reqId: string;
-	capability: "summarize" | "countTokens" | "getContent" | "getDigest" | "complete";
+	capability: "countTokens" | "getContent" | "getDigest" | "complete";
 	ids?: string[];
 	text?: string;
 	/**
