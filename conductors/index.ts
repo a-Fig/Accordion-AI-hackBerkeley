@@ -18,6 +18,7 @@ import { GarbageCollectorConductor } from "./garbage-collector/garbage-collector
 import { NaiveCompactionConductor } from "./compaction-naive/compaction-naive";
 import { Bear2HybridConductor } from "./bear2-hybrid/bear2-hybrid";
 import { CodeSkeletonConductor } from "./code-skeleton/code-skeleton";
+import { KeelConductor } from "./keel/keel";
 import type { Conductor, LockName } from "./contract";
 
 export { BuiltinConductor } from "./builtin/builtin";
@@ -28,6 +29,7 @@ export { GarbageCollectorConductor } from "./garbage-collector/garbage-collector
 export { NaiveCompactionConductor } from "./compaction-naive/compaction-naive";
 export { Bear2HybridConductor } from "./bear2-hybrid/bear2-hybrid";
 export { CodeSkeletonConductor } from "./code-skeleton/code-skeleton";
+export { KeelConductor } from "./keel/keel";
 
 /**
  * A conductor compiled into the app (in-process).
@@ -63,6 +65,7 @@ export const IN_PROCESS_CONDUCTORS: InProcessConductor[] = [
     create: () => new Bear2HybridConductor(),
   },
   { id: "code-skeleton", label: "Code skeleton", create: () => new CodeSkeletonConductor() },
+  { id: "keel", label: "Keel", create: () => new KeelConductor() },
 ];
 
 /** Look up an in-process conductor by id (null if not one). */

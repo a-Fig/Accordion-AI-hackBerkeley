@@ -131,7 +131,7 @@ function sniffLang(text: string): Lang {
 // The mask — blank out string/comment CONTENTS, preserve positions & newlines.
 // ----------------------------------------------------------------------------------------
 
-interface MaskOpts {
+export interface MaskOpts {
   /** `#` starts a line comment (Python). */
   hash?: boolean;
   /** `//` line + `/* *​/` block comments (C-family / JS / TS / Rust / Go / Java). */
@@ -142,7 +142,7 @@ interface MaskOpts {
   triple?: boolean;
 }
 
-const MASK_OPTS: Record<Lang, MaskOpts> = {
+export const MASK_OPTS: Record<Lang, MaskOpts> = {
   ts: { slash: true, backtick: true },
   js: { slash: true, backtick: true },
   svelte: { slash: true, backtick: true },
@@ -165,7 +165,7 @@ const MASK_OPTS: Record<Lang, MaskOpts> = {
  * as flat (C-family block comments don't nest in those languages anyway). Escapes inside
  * single/double-quoted strings are honoured so `"\""` doesn't end the string early.
  */
-function maskSource(src: string, opts: MaskOpts): string {
+export function maskSource(src: string, opts: MaskOpts): string {
   const n = src.length;
   const out = new Array<string>(n);
   let i = 0;
