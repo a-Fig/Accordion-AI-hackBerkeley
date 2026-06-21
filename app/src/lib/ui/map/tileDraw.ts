@@ -82,17 +82,17 @@ export function readPalette(): Palette {
   const v = (name: string) => s.getPropertyValue(name).trim();
   return {
     kindColors: {
-      user: v("--k-user") || "#6ea8fe",
-      text: v("--k-text") || "#aab2c2",
-      thinking: v("--k-thinking") || "#b483e0",
-      tool_call: v("--k-tool_call") || "#34d3c2",
-      tool_result: v("--k-tool_result") || "#f0a35e",
+      user: v("--k-user") || "#044EFF",
+      text: v("--k-text") || "#9A9A9A",
+      thinking: v("--k-thinking") || "#B480DF",
+      tool_call: v("--k-tool_call") || "#21D4C1",
+      tool_result: v("--k-tool_result") || "#E19C7D",
     },
-    accent: v("--accent") || "#6ea8fe",
+    accent: v("--accent") || "#E8E8E8",
     accentDim: v("--accent-dim") || "#2d4a7a",
-    group: v("--group") || "#6f4a32",
-    groupEdge: v("--group-edge") || "#9c6b43",
-    groupAccent: v("--group-accent") || "#d39455",
+    group: v("--group") || "#2C2C2C",
+    groupEdge: v("--group-edge") || "#4A4A4A",
+    groupAccent: v("--group-accent") || "#9A9A9A",
   };
 }
 
@@ -560,7 +560,7 @@ export function drawTile(
 
   // ---- inrange: group-accent ring + group-accent fill tint ----
   if (spec.inrange) {
-    // Warm fill tint (~30% group-accent over the tile)
+    // Smoke-grey fill tint (~30% group-accent over the tile)
     ctx.fillStyle = hexWithAlpha(palette.groupAccent, 0.3);
     roundRectFill(ctx, x, y, w, h, r);
     // Double inset ring: 3px dark then 2px group-accent
@@ -674,6 +674,6 @@ function hexWithAlpha(hex: string, alpha: number): string {
     const [r, g, b] = parseHex(hex);
     return `rgba(${r},${g},${b},${alpha})`;
   } catch {
-    return `rgba(110,168,254,${alpha})`;
+    return `rgba(232,232,232,${alpha})`;
   }
 }

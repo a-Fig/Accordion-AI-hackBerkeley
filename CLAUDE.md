@@ -287,7 +287,7 @@ the conductor).
 
 ## Visual grammar (consistent across ALL views)
 
-- **kind = color** — `user #6ea8fe · text #aab2c2 · thinking #b483e0 · tool_call #34d3c2 · tool_result #f0a35e` (vars `--k-*` in `app.css`).
+- **kind = color** — `user #044EFF · text #9A9A9A · thinking #B480DF · tool_call #21D4C1 · tool_result #E19C7D` (vars `--k-*` in `app.css`). These are the brand **Spectrum** identity colors (defined in `brand/accordion-brand-kit/brand.md`); changing them means updating the brand, not just the CSS. `text` is **Smoke** (monochrome) — brand reserves the four chromatic hues for the named spectrum kinds. The UI accent is also **monochrome** (neutral), because `#044EFF` blue is reserved for the user block kind ("blue is the user, never a button"). Multiblock fold **group** tiles and the summary tile are **monochrome recessed**: `--group #2C2C2C`, `--group-edge #4A4A4A`, `--group-accent #9A9A9A`, `--k-summary #2A2A2A` (the old amber/cocoa group palette is gone). Dark surfaces re-base on the brand's neutral Ink/Charcoal ramp (`--bg #0A0A0A`, `--panel #1C1C1C`, …), no blue tint. Fonts are **IBM Plex Sans** (`--sans`) / **IBM Plex Mono** (`--mono`), loaded via `@fontsource` in `routes/+layout.svelte` (was Inter / JetBrains Mono).
 - **live = solid / folded = recessed** (dim + faint hatch, never a heavy dark hatch).
 - In the **Map Grid**: every block is the **same-size square**, laid out in strict
   conversation order (uniform size ⇒ no reflow holes ⇒ linearity is free). Token

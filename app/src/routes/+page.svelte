@@ -285,6 +285,7 @@
 					<Icon name="accordion" size={40} stroke={1.5} />
 				</div>
 				<h1 class="hero-title">Accordion</h1>
+				<p class="tagline">Your session, intact.</p>
 				<p class="sub">
 					{#if isTauriEnv}
 						{#if discovery.sessions.length}
@@ -354,6 +355,7 @@
 
 	/* ── Topbar ───────────────────────────────────────────────── */
 	.topbar {
+		position: relative;
 		display: flex;
 		align-items: center;
 		gap: var(--sp-3);
@@ -363,6 +365,22 @@
 		background: var(--panel);
 		box-shadow: var(--shadow-1);
 		flex: 0 0 auto;
+	}
+	/* Smoky spectrum hairline along the bottom edge — the brand spectrum kept low-key:
+	   1px tall, ~22% opacity, soft-faded at both ends so it reads as a blended wash, not a
+	   hard rainbow bar. Sits just over the existing --line-soft border. */
+	.topbar::after {
+		content: "";
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		height: 1px;
+		background: var(--gradient-spectrum);
+		opacity: 0.22;
+		-webkit-mask-image: linear-gradient(90deg, transparent, #000 18%, #000 82%, transparent);
+		mask-image: linear-gradient(90deg, transparent, #000 18%, #000 82%, transparent);
+		pointer-events: none;
 	}
 
 	/* Brand cluster: icon + wordmark + divider + session title */
@@ -411,7 +429,7 @@
 	}
 
 	/* Live / Watching chip — colour driven by --chip so both states share one rule.
-	   Preview (default) and Watching = blue; Steering (folding armed) = green. */
+	   Preview (default) and Watching = neutral accent; Steering (folding armed) = green (--ok). */
 	.live-chip {
 		--chip: var(--accent);
 		display: inline-flex;
@@ -590,6 +608,17 @@
 		letter-spacing: -0.03em;
 		margin: 0;
 		line-height: 1.1;
+	}
+	/* Brand tagline — quiet subtitle under the wordmark, kept on one line. */
+	.tagline {
+		font-family: var(--sans);
+		font-size: var(--fs-base);
+		font-weight: 500;
+		color: var(--muted);
+		letter-spacing: -0.01em;
+		margin: 0;
+		line-height: 1.3;
+		white-space: nowrap;
 	}
 	.sub {
 		font-size: var(--fs-base);

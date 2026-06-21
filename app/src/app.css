@@ -3,56 +3,61 @@
  * so its colors are first-class tokens used by every component. */
 
 :root {
-	/* ===== Surfaces — refined cool-dark elevation ladder ===== */
-	--bg: #0b0d12;
-	--panel: #14171f;
-	--panel-2: #1a1e28;
-	--panel-3: #232834;
-	--panel-4: #2c3340;        /* NEW: active/highest control */
-	--line: #2c3342;
-	--line-soft: #20252f;
-	--line-strong: #3a4252;    /* NEW: emphasized border */
+	/* ===== Surfaces — neutral Ink/Charcoal elevation ladder (brand) ===== */
+	--bg: #0A0A0A;             /* Ink */
+	--panel: #1C1C1C;          /* Charcoal */
+	--panel-2: #232323;
+	--panel-3: #2C2C2C;
+	--panel-4: #383838;        /* active/highest control, stepping toward Slate #4A4A4A */
+	--line: #2E2E2E;
+	--line-soft: #202020;
+	--line-strong: #3C3C3C;    /* emphasized border */
 
-	--text: #eef1f6;
-	--muted: #9aa3b4;          /* bumped for AA contrast on panels */
-	--faint: #828b9e;          /* AA-compliant on panel-2 */
+	--text: #F6F6F6;           /* Paper */
+	--muted: #9A9A9A;          /* Smoke — AA on panels */
+	--faint: #8C8C8C;          /* neutral tertiary step — ~AA (4.5:1) on panel-2 */
 
-	--accent: #6ea8fe;
-	--accent-hover: #8bbcff;   /* NEW */
-	--accent-dim: #2d4a7a;
-	--accent-soft: rgba(110, 168, 254, 0.14); /* NEW: tint fills */
-	--danger: #ff6b6b;
-	--ok: #46d39a;
-	--warn: #f0b450;
+	/* UI accent — MONOCHROME (brand rule: blue is the user, never a button) */
+	--accent: #E8E8E8;         /* Cloud — primary actions / focus */
+	--accent-hover: #FFFFFF;
+	--accent-dim: #2C2C2C;     /* charcoal selection bg (also drives ::selection) */
+	--accent-soft: rgba(255, 255, 255, 0.08); /* tint fills */
+	--danger: #D26B6B;         /* muted red */
+	--ok: #5CB88A;             /* muted green */
+	--warn: #D6A24E;           /* muted amber — kept distinct from peach --k-tool_result */
 
-	/* block kinds — DO NOT CHANGE (visual-grammar contract) */
-	--k-user: #6ea8fe;
-	--k-text: #aab2c2;
-	--k-thinking: #b483e0;
-	--k-tool_call: #34d3c2;
-	--k-tool_result: #f0a35e;
-	/* synthesized-summary tile (sliver fold mode) — cocoa; darker than --group (#6f4a32) so
-	   the summary never visually collides with a collapsed group tile */
-	--k-summary: #4a3528;
+	/* block kinds — track the brand Spectrum identity (brand/accordion-brand-kit/brand.md).
+	   These VALUES intentionally override the former "DO NOT CHANGE" contract: the spectrum
+	   is now the canonical block-kind palette. Names are still load-bearing — do not rename. */
+	--k-user: #044EFF;
+	--k-text: #9A9A9A;         /* Smoke — text is monochrome by brand rule */
+	--k-thinking: #B480DF;
+	--k-tool_call: #21D4C1;
+	--k-tool_result: #E19C7D;
+	/* synthesized-summary tile (sliver fold mode) — dark neutral recessed tone; distinct
+	   from --group (#2C2C2C) so the summary never collides with a collapsed group tile */
+	--k-summary: #2A2A2A;
 
-	/* multiblock folds (groups) — DO NOT CHANGE */
-	--group: #6f4a32;
-	--group-edge: #9c6b43;
-	--group-accent: #d39455;
-	--group-band: rgba(211, 148, 85, 0.07);
-	--group-ink: #1a0f06;           /* dark text on amber group button */
-	--group-accent-light: #ffda9e;  /* hover tint for amber group button */
+	/* multiblock folds (groups) — MONOCHROME RECESSED (reads as folded, not live) */
+	--group: #2C2C2C;               /* recessed charcoal */
+	--group-edge: #4A4A4A;          /* Slate */
+	--group-accent: #9A9A9A;        /* Smoke — group button / highlight */
+	--group-band: rgba(154, 154, 154, 0.07);
+	--group-ink: #0A0A0A;           /* Ink text on the light smoke group button */
+	--group-accent-light: #E8E8E8;  /* hover tint for group button */
 
-	/* ===== Radii ===== */
-	--radius-xs: 4px;          /* inline code chips / tiny markers */
-	--radius: 10px;
-	--radius-sm: 6px;
-	--radius-lg: 14px;         /* NEW */
-	--radius-pill: 999px;      /* NEW */
+	/* ===== Radii (brand) ===== */
+	--radius-xs: 4px;          /* inline code chips / tiny markers (floor) */
+	--radius: 12px;
+	--radius-sm: 8px;
+	--radius-lg: 16px;
+	--radius-xl: 20px;         /* NEW (brand) */
+	--radius-pill: 999px;
 
-	/* ===== Spacing 4/8 rhythm (NEW) ===== */
+	/* ===== Spacing 4/8 rhythm (brand) ===== */
 	--sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px;
-	--sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+	--sp-4: 16px; --sp-5: 22px; --sp-6: 32px;
+	--sp-7: 48px; --sp-8: 64px; /* NEW (brand) */
 
 	/* ===== Type scale (NEW) ===== */
 	/* --fs-2xs (9px) is a deliberate floor for decorative micro-labels only
@@ -66,12 +71,15 @@
 	--shadow-2: 0 4px 12px rgba(0,0,0,.45), 0 1px 2px rgba(0,0,0,.4);
 	--shadow-3: 0 12px 32px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.4);
 
-	/* ===== Focus ring (NEW — accessibility) ===== */
-	--focus: #8bbcff;
+	/* ===== Focus ring (accessibility) — neutral, monochrome ===== */
+	--focus: #E8E8E8;
 	--focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--focus);
 
-	--mono: "JetBrains Mono Variable", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
-	--sans: "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+	/* ===== Spectrum gradient (brand) — folded context made visible ===== */
+	--gradient-spectrum: linear-gradient(90deg,#21D4C1 0%,#1AA6E8 30%,#044EFF 48%,#7D6EE6 64%,#B480DF 78%,#E19C7D 100%);
+
+	--mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+	--sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 
 	--dur-fast: 120ms;
 	--dur-mid: 200ms;
@@ -101,7 +109,6 @@ body {
 	-webkit-font-smoothing: antialiased;
 	-moz-osx-font-smoothing: grayscale;
 	text-rendering: optimizeLegibility;
-	font-feature-settings: "cv01","ss01";
 	overflow: hidden; /* the app manages its own scroll regions */
 }
 

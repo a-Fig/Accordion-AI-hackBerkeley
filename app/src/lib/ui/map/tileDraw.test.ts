@@ -269,12 +269,12 @@ describe("resetSprites — clears sprite cache so DPR change forces rebuild", ()
 
 describe("desaturate", () => {
   it("returns a valid rgb() string", () => {
-    const result = desaturate("#b483e0");
+    const result = desaturate("#B480DF"); // brand --k-thinking
     expect(result).toMatch(/^rgb\(/);
   });
 
   it("does not crash on dark colors", () => {
-    expect(() => desaturate("#6f4a32")).not.toThrow();
+    expect(() => desaturate("#2C2C2C")).not.toThrow(); // brand --group (monochrome recessed)
   });
 
   it("returns grey for fully saturated colors at factor=0", () => {

@@ -1361,13 +1361,13 @@
 		color: var(--muted);
 	}
 
-	/* ---- range selection toolbar affordances — warm amber "building" chip ---- */
+	/* ---- range selection toolbar affordances — smoke-grey "building" chip ---- */
 	.range-bar {
 		display: inline-flex;
 		align-items: center;
 		gap: var(--sp-2);
 	}
-	/* Counter chip: pill shape, amber family, signals "forming a new object". */
+	/* Counter chip: pill shape, group-accent (smoke) family, signals "forming a new object". */
 	.range-chip {
 		display: inline-flex;
 		align-items: center;
@@ -1676,7 +1676,8 @@
 	/* ---- open group row: its own full-width band between tile grids (a flex child of .stack,
 	   NOT a grid item) so it takes natural height and can never overflow a fixed cell-height
 	   track and overlap the tiles below. The accented LEFT edge signals "this whole row is one
-	   group." Opening/closing only inserts/removes this band — the tile grids stay uniform. ---- */
+	   group." Opening/closing only inserts/removes this band — the tile grids stay uniform.
+	   The accent is now monochrome smoke (--group-accent), not the old amber. ---- */
 	.group-band {
 		width: 100%;
 		box-sizing: border-box;
@@ -1690,7 +1691,7 @@
 		gap: 8px;
 		flex-wrap: wrap;
 	}
-	/* UNFOLDED (live): a stronger warm edge — the members are really in the model's context. */
+	/* UNFOLDED (live): a stronger smoke edge — the members are really in the model's context. */
 	.group-band.live {
 		background: color-mix(in srgb, var(--group-accent) 11%, transparent);
 		border-left-color: var(--group-accent);
@@ -1753,13 +1754,16 @@
 		flex: 0 0 auto;
 	}
 
-	/* Summary tile: stands in for the whole folded run; cocoa color signals synthesis.
+	/* Summary tile: stands in for the whole folded run; recessed charcoal signals synthesis.
 	   Reuses .cell.face.fN for dice pips (::before pseudo, no extra markup needed).
-	   No dashed outline — the cocoa color alone carries the "synthesized" signal. */
+	   The palette is now monochrome, so --k-summary (#2A2A2A) sits a hair darker than the
+	   group cocoa (--group #2C2C2C). To keep the two distinct without a hue cue, the summary
+	   tile carries a thin SMOKE-grey rim (--group-accent) — a flat, light-edged synthesized
+	   tile vs the group's heavy beveled cocoa with its dark --group-edge ring. */
 	.summary-tile {
 		background: var(--k-summary);
-		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22),
-		            inset 0 0 0 2px rgba(255, 255, 255, 0.06);
+		box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--group-accent) 38%, transparent),
+		            inset 0 0 0 2px rgba(255, 255, 255, 0.05);
 		flex: 0 0 auto;
 		cursor: pointer;
 	}

@@ -35,6 +35,7 @@
 		| 'activity'
 		| 'play'
 		| 'square'
+		| 'fold'
 		| 'accordion';
 
 	// Raw inner SVG markup for each icon (Lucide 24×24 path geometry).
@@ -45,18 +46,22 @@
 		'chevron-up': `<polyline points="18 15 12 9 6 15"/>`,
 		'chevrons-left': `<polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/>`,
 		'chevrons-right': `<polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/>`,
-		'x': `<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>`,
-		'check': `<polyline points="20 6 9 17 4 12"/>`,
+		// Brand 'close' glyph (stroke-width 2).
+		'x': `<path stroke-width="2" d="M6 6l12 12M18 6L6 18"/>`,
+		// Brand 'check' glyph (stroke-width 2).
+		'check': `<path stroke-width="2" d="M5 12.5l4 4 10-10"/>`,
 		'pin': `<line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17z"/>`,
 		'pin-off': `<line x1="2" y1="2" x2="22" y2="22"/><line x1="12" y1="17" x2="12" y2="22"/><path d="M9 9v1.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h12"/><path d="M15 9.34V6h1a2 2 0 0 0 0-4H7.89"/>`,
 		'lock': `<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>`,
 		'eye': `<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>`,
 		'eye-off': `<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>`,
 		'rotate-ccw': `<polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.98"/>`,
-		'plus': `<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>`,
+		// Brand 'plus' glyph (stroke-width 2).
+		'plus': `<path stroke-width="2" d="M12 5v14M5 12h14"/>`,
 		'minus': `<line x1="5" y1="12" x2="19" y2="12"/>`,
 		'layout-grid': `<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>`,
-		'layers': `<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>`,
+		// Brand 'layers' glyph (stroke-width 2).
+		'layers': `<path stroke-width="2" d="M12 4l8 4-8 4-8-4 8-4Z"/><path stroke-width="2" d="M4 12l8 4 8-4"/><path stroke-width="2" d="M4 16l8 4 8-4"/>`,
 		'git-merge': `<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>`,
 		'trash-2': `<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>`,
 		// chevrons-down-up = fold vertical (compress toward center)
@@ -65,7 +70,8 @@
 		'chevrons-up-down': `<polyline points="7 15 12 20 17 15"/><polyline points="7 9 12 4 17 9"/>`,
 		'corner-down-right': `<polyline points="15 10 20 15 15 20"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/>`,
 		'target': `<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>`,
-		'search': `<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>`,
+		// Brand 'search' glyph (stroke-width 2).
+		'search': `<circle stroke-width="2" cx="11" cy="11" r="6"/><path stroke-width="2" d="M20 20l-4.2-4.2"/>`,
 		'folder': `<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>`,
 		'file-text': `<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>`,
 		'circle': `<circle cx="12" cy="12" r="10"/>`,
@@ -77,10 +83,13 @@
 		'activity': `<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>`,
 		'play': `<polygon points="5 3 19 12 5 21 5 3"/>`,
 		'square': `<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>`,
-		// Custom accordion brand mark: 4 vertical bellows folds on a 24×24 grid.
-		// A rounded rect outline (the body) with three interior zig-zag fold lines
-		// suggesting a compressed bellows / accordion. Reads crisply at 16–28px.
-		'accordion': `<rect x="4" y="3" width="16" height="18" rx="2.5"/><polyline points="4 8 8 6 12 8 16 6 20 8"/><polyline points="4 13 8 11 12 13 16 11 20 13"/><polyline points="4 18 8 16 12 18 16 16 20 18"/>`,
+		// Brand 'fold' glyph — the signature action icon (stroke-width 2).
+		'fold': `<path stroke-width="2" d="M8 5l4 3 4-3"/><path stroke-width="2" d="M4 12h16"/><path stroke-width="2" d="M8 19l4-3 4 3"/>`,
+		// Accordion brand symbol: the bellows-A. A bold letter "A" on the left
+		// (two legs + crossbar) sits beside a folded accordion bellows on the right
+		// (a zig-zag of peaked pleats), recreating the official brand mark. Pure
+		// stroke + currentColor so it recolors in chrome; reads crisply at 16–24px.
+		'accordion': `<path d="M2 21 L6.3 3 L10.6 21"/><line x1="3.7" y1="14.2" x2="8.9" y2="14.2"/><path d="M12.5 5.5 L12.5 19 L15.5 20.8 L15.5 6.2 L18.5 4.4 L18.5 18.6 L21.5 20.4 L21.5 6"/>`,
 	};
 
 	let {
