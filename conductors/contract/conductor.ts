@@ -133,11 +133,24 @@ export interface FoldCommand {
  * `{#code FOLDED}` digest (the smallest wire-safe form) — guaranteeing the view always matches
  * what the agent receives. Only `text`/`thinking`/`tool_result` fold; a `replace` on a
  * `user`/`tool_call` is clamped `not-foldable`.
+ *
+ * `recoverable` (default `false`): when `true`, the host prepends the agent-recoverable
+ * `{#code FOLDED}` tag to the substitution — the SAME handle an engine digest carries — so the
+ * agent can `unfold`/`recall` the block back to its ORIGINAL full content from the tag's code.
+ * Use it for a substitution that is lossy-by-display but LOSSLESS-by-reference: a stand-in the
+ * agent must be able to expand on demand (e.g. a code skeleton that replaces a file body but
+ * keeps the full source one `unfold` away). Leave it `false`/omitted for a substitution the
+ * agent should NOT be invited to expand (e.g. a naive-compaction summary that has discarded the
+ * original — tagging that would dangle a handle to content the host no longer holds folded).
+ * The conductor supplies the BODY only; the host owns the tag (single source of truth — the
+ * `{#code FOLDED}` format lives in the engine and is never re-implemented conductor-side).
+ * Ignored when `content` is empty (that path folds to the engine digest, already tagged).
  */
 export interface ReplaceCommand {
 	kind: "replace";
 	id: string;
 	content: string;
+	recoverable?: boolean;
 }
 
 /**

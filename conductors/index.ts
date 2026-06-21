@@ -17,6 +17,7 @@ import { SlidingWindowConductor } from "./sliding-window/sliding-window";
 import { GarbageCollectorConductor } from "./garbage-collector/garbage-collector";
 import { NaiveCompactionConductor } from "./compaction-naive/compaction-naive";
 import { Bear2HybridConductor } from "./bear2-hybrid/bear2-hybrid";
+import { CodeSkeletonConductor } from "./code-skeleton/code-skeleton";
 import type { Conductor, LockName } from "./contract";
 
 export { BuiltinConductor } from "./builtin/builtin";
@@ -26,6 +27,7 @@ export { SlidingWindowConductor } from "./sliding-window/sliding-window";
 export { GarbageCollectorConductor } from "./garbage-collector/garbage-collector";
 export { NaiveCompactionConductor } from "./compaction-naive/compaction-naive";
 export { Bear2HybridConductor } from "./bear2-hybrid/bear2-hybrid";
+export { CodeSkeletonConductor } from "./code-skeleton/code-skeleton";
 
 /**
  * A conductor compiled into the app (in-process).
@@ -60,6 +62,7 @@ export const IN_PROCESS_CONDUCTORS: InProcessConductor[] = [
     locks: ["human-steering", "agent-unfold"],
     create: () => new Bear2HybridConductor(),
   },
+  { id: "code-skeleton", label: "Code skeleton", create: () => new CodeSkeletonConductor() },
 ];
 
 /** Look up an in-process conductor by id (null if not one). */

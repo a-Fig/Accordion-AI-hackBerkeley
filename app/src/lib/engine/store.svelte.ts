@@ -12,7 +12,7 @@
  * intent. Deterministic and explainable; the smarts come later.
  */
 import type { Block, Actor, SessionMeta, ParsedSession, Group } from "./types";
-import { digest, digestTokens, groupDigest, groupDigestTokens, substTokens, wireFoldable } from "./digest";
+import { digest, digestTokens, foldTag, groupDigest, groupDigestTokens, substTokens, wireFoldable } from "./digest";
 import { estTokens, BLOCK_OVERHEAD } from "./tokens";
 import type { Conductor, ConductorView, Command, ClampReport, ClampReason, LockName, ConductorHost, CompletionRequest, CompletionResult, JSONValue } from "$conductors/contract";
 import { hasLock } from "$conductors/contract";
@@ -36,6 +36,12 @@ interface GroupShape {
 
 /** Whole-block slack allowed above `protectTokens` before the next older block is left foldable. */
 const PROTECT_OVERFLOW_CAP = 1.25;
+
+/** A leading `{#code FOLDED}` tag (with any surrounding whitespace) a conductor may have
+ *  mistakenly baked into a recoverable `replace` body. Stripped in `substOne` so the engine
+ *  stays the SOLE author of the tag — a conductor passing its own (possibly wrong-id or
+ *  whitespace-shifted) tag can never reach the agent. `foldCode` is 6 base36 chars. */
+const LEADING_FOLD_TAG = /^\s*\{#[0-9a-z]{6} FOLDED\}\s*/;
 
 /**
  * The "message key" of a block id — the id with its assistant-part suffix removed,
@@ -996,7 +1002,7 @@ export class AccordionStore {
 					for (const id of c.ids) this.substOne(id, c.digest, by, "fold", reports);
 					break;
 				case "replace":
-					this.substOne(c.id, c.content, by, "replace", reports);
+					this.substOne(c.id, c.content, by, "replace", reports, c.recoverable ?? false);
 					break;
 				case "restore":
 				case "pin":
@@ -1016,7 +1022,7 @@ export class AccordionStore {
 	 * auto-folder; a non-empty string substitutes that exact content; an empty string `""`
 	 * can't be a wire content part, so it folds to the engine digest too (see the body).
 	 */
-	private substOne(id: string, content: string | undefined, by: Actor, kind: "fold" | "replace", reports: ClampReport[]): void {
+	private substOne(id: string, content: string | undefined, by: Actor, kind: "fold" | "replace", reports: ClampReport[], recoverable = false): void {
 		const b = this.get(id);
 		if (!b) return void reports.push(clamp(kind, [id], "unknown-id", `no block ${id}`));
 		if (b.override !== null) return void reports.push(clamp(kind, [id], "human-override", `${label(b)} is held by the human`));
@@ -1036,7 +1042,20 @@ export class AccordionStore {
 		// content part (`computeFoldOps` drops an empty digest), so `subst=""` would recess the
 		// tile and count the saving while the agent still receives the block whole. Fall back to
 		// the engine digest (the smallest wire-safe form) so the view matches what the wire sends.
-		b.subst = content === "" ? undefined : content;
+		if (content === "" || content === undefined) {
+			b.subst = undefined;
+		} else if (recoverable) {
+			// ReplaceCommand.recoverable: make the substitution agent-recoverable by prepending
+			// the `{#code FOLDED}` tag — the SAME handle `digest()` carries, so `unfold`/`recall`
+			// resolve this block by `foldCode(id)` exactly as for an engine digest. The tag's
+			// format is owned HERE (the engine) and nowhere else: strip any leading tag the
+			// conductor may have supplied (it must pass only the body) and always prepend the
+			// authoritative `foldTag(id)`, so a wrong-id or double tag can never reach the agent.
+			// `substTokens` then counts the tag, so the saving stays honest.
+			b.subst = `${foldTag(id)} ${content.replace(LEADING_FOLD_TAG, "")}`;
+		} else {
+			b.subst = content;
+		}
 		b.by = by;
 	}
 
