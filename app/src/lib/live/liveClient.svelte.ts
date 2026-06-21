@@ -50,9 +50,10 @@ const pendingCompletions = new Map<number, { resolve: (r: CompletionResult) => v
 let completionReqId = 0;
 
 /** Live connection status, for the UI. */
-export const live = $state<{ status: "idle" | "connecting" | "connected" | "error"; detail: string }>({
+export const live = $state<{ status: "idle" | "connecting" | "connected" | "error"; detail: string; sessionId: string | null }>({
 	status: "idle",
 	detail: "",
+	sessionId: null,
 });
 
 /**
@@ -185,6 +186,7 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 	manualClose = false;
 	live.status = "connecting";
 	live.detail = `ws://127.0.0.1:${port}`;
+	live.sessionId = null;
 	session.error = "";
 
 	let ws: WebSocket;
@@ -207,16 +209,18 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 		if (!isServerMessage(parsed)) return; // ignore anything off-protocol
 		const msg: ServerMessage = parsed;
 		if (msg.type === "hello") {
-				if (msg.protocolVersion !== PROTOCOL_VERSION) {
-					// Refuse a version mismatch loudly rather than driving the session with a wire
-					// shape one side does not understand (in M2 that would silently corrupt the fold
-					// ops / digests applied to the model context).
-					live.status = "error";
-					live.detail = `protocol mismatch - extension v${msg.protocolVersion}, app v${PROTOCOL_VERSION}; update both to the same version`;
-					try { ws.close(); } catch { /* ignore */ }
-					return;
-				}
+			if (msg.protocolVersion !== PROTOCOL_VERSION) {
+				// Refuse a version mismatch loudly rather than driving the session with a wire
+				// shape one side does not understand (in M2 that would silently corrupt the fold
+				// ops / digests applied to the model context).
+				live.status = "error";
+				live.detail = `protocol mismatch - extension v${msg.protocolVersion}, app v${PROTOCOL_VERSION}; update both to the same version`;
+				live.sessionId = null;
+				try { ws.close(); } catch { /* ignore */ }
+				return;
+			}
 			live.status = "connected";
+			live.sessionId = typeof msg.sessionId === "string" ? msg.sessionId : null;
 			session.error = "";
 			session.filePath = null;
 			// A live pi session is steerable, never a read-only recording. Reset here —
@@ -224,9 +228,9 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 			// stick when attaching after viewing a Claude Code transcript, regardless of
 			// which caller reached connectLive.
 			session.readOnly = false;
-				// Safety (review Q5b): every new live attach starts DISARMED - folding is
-				// opt-in per session, never silently carried from a previously armed agent.
-				folding.enabled = false;
+			// Safety (review Q5b): every new live attach starts DISARMED - folding is
+			// opt-in per session, never silently carried from a previously armed agent.
+			folding.enabled = false;
 			// Structural reset: clear all ghosts — no ghost survives a session reconnect.
 			ghostClearAll();
 			budgetLive = false;
@@ -391,6 +395,7 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 	ws.onerror = () => {
 		live.status = "error";
 		live.detail = `could not reach pi on :${port} — is a pi session running with the accordion extension?`;
+		live.sessionId = null;
 	};
 
 	ws.onclose = () => {
@@ -398,21 +403,22 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 		// GUI state. A ghost cannot outlive the WS connection that spawned it.
 		ghostClearAll();
 		// Only the ACTIVE socket may touch shared status. A superseded socket - a prior
-			// connection whose close fires asynchronously after connectLive() already swapped
-			// in a new one and reset manualClose - must NOT run this block, or it clobbers the
-			// new socket's connecting/connected state back to idle.
-			if (socket === ws) {
-				socket = null;
-				// Clear the completion backend so `host.can("complete")` returns false while
-				// disconnected. Drain any pending completion promises with a disconnection error
-				// so they do not hang indefinitely.
-				if (session.store) session.store.completer = null;
-				drainPendingCompletions("disconnected");
-				if (!manualClose && live.status !== "error") {
-					live.status = "idle";
-					live.detail = "disconnected";
-				}
+		// connection whose close fires asynchronously after connectLive() already swapped
+		// in a new one and reset manualClose - must NOT run this block, or it clobbers the
+		// new socket's connecting/connected state back to idle.
+		if (socket === ws) {
+			socket = null;
+			live.sessionId = null;
+			// Clear the completion backend so `host.can("complete")` returns false while
+			// disconnected. Drain any pending completion promises with a disconnection error
+			// so they do not hang indefinitely.
+			if (session.store) session.store.completer = null;
+			drainPendingCompletions("disconnected");
+			if (!manualClose && live.status !== "error") {
+				live.status = "idle";
+				live.detail = "disconnected";
 			}
+		}
 	};
 }
 
@@ -438,5 +444,5 @@ export function disconnectLive(): void {
 		socket = null;
 	}
 	if (live.status !== "error") live.status = "idle";
+	live.sessionId = null;
 }
-

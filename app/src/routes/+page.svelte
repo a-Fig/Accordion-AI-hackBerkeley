@@ -17,10 +17,12 @@
 	import MapHeader from "$lib/ui/map/MapHeader.svelte";
 	import ContextMap from "$lib/ui/map/ContextMap.svelte";
 	import Inspector from "$lib/ui/map/Inspector.svelte";
+	import ConductorActivity from "$lib/ui/map/ConductorActivity.svelte";
 	import Icon from "$lib/ui/Icon.svelte";
 
 	let selectedId = $state<string | null>(null);
 	let manualPort = $state(DEFAULT_PORT);
+	let activityOpen = $state(false);
 
 	// Which session source the sidebar lists: live pi vs read-only Claude Code.
 	const SRC_KEY = "accordion.sidebar.source";
@@ -233,6 +235,16 @@
 						<span class="meta-chip mono tnum">{s.blocks.length} blocks</span>
 					</div>
 					<div class="nav-row">
+						<button
+							class="nav-btn"
+							class:active={activityOpen}
+							onclick={() => (activityOpen = !activityOpen)}
+							aria-pressed={activityOpen}
+							title="Show conductor activity"
+						>
+							<Icon name="activity" size={13} />
+							Activity
+						</button>
 						{#if live.status === "connected"}
 							<button class="nav-btn" onclick={disconnectLive}>
 								<Icon name="x" size={13} />
@@ -249,10 +261,13 @@
 
 				<MapHeader store={s} readOnly={session.readOnly} />
 
-				<div class="main" class:open={!!selectedBlock || !!selectedGroup}>
+				<div class="main" class:open={!!selectedBlock || !!selectedGroup} class:activity={activityOpen}>
 					<div class="canvas">
 						<ContextMap store={s} {selectedId} onselect={(id) => (selectedId = selectedId === id ? null : id)} />
 					</div>
+					{#if activityOpen}
+						<ConductorActivity store={s} onclose={() => (activityOpen = false)} />
+					{/if}
 					{#if selectedBlock || selectedGroup}
 						<Inspector
 							store={s}
@@ -512,6 +527,11 @@
 		background: var(--panel-4);
 		border-color: var(--line-strong);
 	}
+	.nav-btn.active {
+		color: var(--accent);
+		background: var(--accent-soft);
+		border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+	}
 
 	/* ── Main grid (canvas + inspector) ──────────────────────── */
 	.main {
@@ -523,6 +543,12 @@
 	}
 	.main.open {
 		grid-template-columns: minmax(0, 1fr) minmax(360px, 30vw);
+	}
+	.main.activity {
+		grid-template-columns: minmax(0, 1fr) minmax(280px, 320px);
+	}
+	.main.open.activity {
+		grid-template-columns: minmax(0, 1fr) minmax(200px, 260px) minmax(360px, 30vw);
 	}
 	.canvas {
 		min-width: 0;

@@ -15,6 +15,7 @@ import WebSocket from "ws"; // default export = the WebSocket class (works wheth
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = 7791; // isolated from the default 7704
+const ERROR_PORT = 7792;
 
 function makeView() {
 	const blocks: any[] = [];
@@ -53,10 +54,11 @@ test("WS round-trip: hello → context/update → valid commands", async () => {
 		const foldable = new Set(["text", "thinking", "tool_result"]);
 		const byId = new Map(view.blocks.map((b: any) => [b.id, b]));
 
-		const commands: any[] = await new Promise((resolve, reject) => {
+		const result: { commands: any[]; status: any } = await new Promise((resolve, reject) => {
 			const timer = setTimeout(() => reject(new Error("timed out waiting for commands")), 8000);
 			let gotHello = false;
 			let gotHostComplete = false;
+			let status: any = null;
 			ws.on("open", () => {
 				ws.send(JSON.stringify({
 					type: "host/hello", conductorProtocol: 3,
@@ -75,16 +77,23 @@ test("WS round-trip: hello → context/update → valid commands", async () => {
 					assert.equal(msg.capability, "complete");
 					assert.ok(msg.reqId.startsWith("summary-"));
 					gotHostComplete = true;
+				} else if (msg.type === "conductor/status") {
+					status = msg;
 				} else if (msg.type === "conductor/commands") {
 					assert.ok(gotHello, "hello precedes commands");
 					assert.ok(gotHostComplete, "v2 asks the host for summaries by default");
+					assert.ok(status, "status telemetry precedes commands");
+					assert.ok(status.details?.health, "status includes health details");
+					assert.ok(Array.isArray(status.details?.unitTrace), "status includes unit trace");
+					assert.ok(status.details?.caches?.summary, "status includes cache diagnostics");
 					clearTimeout(timer);
-					resolve(msg.commands);
+					resolve({ commands: msg.commands, status });
 				}
 			});
 			ws.on("error", reject);
 		});
 
+		const commands = result.commands;
 		assert.ok(commands.length > 0, "expected folds under pressure");
 		for (const c of commands) {
 			assert.ok(["fold", "replace", "group"].includes(c.kind), `known command kind: ${c.kind}`);
@@ -98,6 +107,76 @@ test("WS round-trip: hello → context/update → valid commands", async () => {
 				}
 			}
 		}
+		ws.close();
+	} finally {
+		child.kill("SIGTERM");
+	}
+});
+
+test("clears provider error after a later successful host completion", async () => {
+	const env = { ...process.env, CONDUCTOR_PORT: String(ERROR_PORT), ACCORDION_HOME: mkdtempSync(join(tmpdir(), "acc-")) };
+	const child = spawn("node", [join(HERE, "the-conductor.ts")], { env, stdio: ["ignore", "ignore", "inherit"] });
+
+	try {
+		await new Promise((r) => setTimeout(r, 600));
+		const ws = new WebSocket(`ws://127.0.0.1:${ERROR_PORT}`);
+		const baseView = makeView();
+
+		await new Promise<void>((resolve, reject) => {
+			let failed = false;
+			let succeeded = false;
+			let recoveryRev = 2;
+			let retry: ReturnType<typeof setInterval> | null = null;
+			const timer = setTimeout(() => {
+				if (retry) clearInterval(retry);
+				reject(new Error("timed out waiting for provider error to clear"));
+			}, 10_000);
+
+			const sendView = (rev: number) => {
+				ws.send(JSON.stringify({ ...baseView, rev }));
+			};
+
+			ws.on("open", () => {
+				ws.send(JSON.stringify({
+					type: "host/hello", conductorProtocol: 3,
+					session: { title: "smoke", model: "test", cwd: "/tmp" }, budget: baseView.budget, contextWindow: 200_000,
+				}));
+			});
+			ws.on("message", (raw) => {
+				const msg = JSON.parse(raw.toString());
+				if (msg.type === "conductor/hello") {
+					sendView(1);
+					return;
+				}
+				if (msg.type === "cap/request") {
+					if (!failed) {
+						ws.send(JSON.stringify({ type: "cap/result", reqId: msg.reqId, ok: false, error: "host completion failed in test" }));
+						failed = true;
+						retry = setInterval(() => sendView(recoveryRev++), 100);
+					} else {
+						ws.send(JSON.stringify({ type: "cap/result", reqId: msg.reqId, ok: true, value: "host summary recovered" }));
+						succeeded = true;
+						if (retry) {
+							clearInterval(retry);
+							retry = null;
+						}
+					}
+					return;
+				}
+				if (msg.type !== "conductor/status") return;
+				const latestError = msg.details?.caches?.latestProviderError || msg.details?.caches?.summary?.latestError;
+				if (failed && succeeded && !latestError) {
+					clearTimeout(timer);
+					if (retry) clearInterval(retry);
+					resolve();
+				}
+			});
+			ws.on("error", (error) => {
+				clearTimeout(timer);
+				if (retry) clearInterval(retry);
+				reject(error);
+			});
+		});
 		ws.close();
 	} finally {
 		child.kill("SIGTERM");

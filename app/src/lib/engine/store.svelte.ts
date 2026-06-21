@@ -63,6 +63,43 @@ interface LogEntry {
 	n: number;
 }
 
+export type DecisionAction =
+	| "fold"
+	| "replace"
+	| "restore"
+	| "unfold"
+	| "pin"
+	| "unpin"
+	| "group"
+	| "ungroup"
+	| "fold-group"
+	| "unfold-group"
+	| "clamp"
+	| "reset";
+
+export interface DecisionEvent {
+	n: number;
+	at: number;
+	by: Actor;
+	action: DecisionAction;
+	ids: string[];
+	detail: string;
+	turn?: number;
+	kind?: Block["kind"] | "group";
+	reason?: string;
+}
+
+interface FoldSnapshot {
+	folded: boolean;
+	digest: string;
+	grouped: boolean;
+}
+
+interface GroupSnapshot {
+	memberIds: string[];
+	digest: string | null | undefined;
+}
+
 export class AccordionStore {
 	meta: SessionMeta;
 	blocks = $state<Block[]>([]);
@@ -82,6 +119,8 @@ export class AccordionStore {
 	protectTokens = $state(20_000);
 	log = $state<LogEntry[]>([]);
 	private logN = 0;
+	decisionJournal = $state<DecisionEvent[]>([]);
+	private decisionN = 0;
 	/** Bumped on every settled change — a cheap redraw signal for canvas views. */
 	version = $state(0);
 	/**
@@ -808,6 +847,8 @@ export class AccordionStore {
 		if (this.conducting) return;
 		this.conducting = true;
 		try {
+			const before = this.snapshotFoldState();
+			const beforeGroups = this.snapshotFoldedConductorGroups();
 			// A group can never overlap the protected tail; drop any that now does (e.g. the
 			// tail was widened over it) before anything reads group state this pass.
 			this.pruneProtectedGroups();
@@ -850,7 +891,9 @@ export class AccordionStore {
 				// are always logged so they are visible in the activity feed.
 				if (r.reason === "noop") continue;
 				this.emit(by, `clamped · ${r.reason}`, r.detail);
+				this.recordDecision(by, "clamp", r.ids, r.detail, r.reason);
 			}
+			this.recordConductorTransitions(before, beforeGroups);
 		} finally {
 			this.conducting = false;
 		}
@@ -1079,6 +1122,130 @@ export class AccordionStore {
 		if (this.log.length > 80) this.log.pop();
 	}
 
+	private recordDecision(by: Actor, action: DecisionAction, ids: string[], detail: string, reason?: string): void {
+		const first = ids.length ? this.get(ids[0]) : undefined;
+		this.prependDecisionEvents([{
+			n: this.decisionN++,
+			at: Date.now(),
+			by,
+			action,
+			ids,
+			detail,
+			turn: first?.turn,
+			kind: first?.kind,
+			reason,
+		}]);
+	}
+
+	private recordGroupDecision(by: Actor, action: DecisionAction, g: Group, detail: string): void {
+		this.prependDecisionEvents([{
+			n: this.decisionN++,
+			at: Date.now(),
+			by,
+			action,
+			ids: [g.id, ...g.memberIds],
+			detail,
+			turn: this.get(g.memberIds[0])?.turn,
+			kind: "group",
+		}]);
+	}
+
+	private prependDecisionEvents(events: DecisionEvent[]): void {
+		if (!events.length) return;
+		this.decisionJournal = [...events, ...this.decisionJournal].slice(0, 500);
+	}
+
+	private snapshotFoldState(): Map<string, FoldSnapshot> {
+		const m = new Map<string, FoldSnapshot>();
+		for (const b of this.blocks) {
+			const folded = this.isFolded(b);
+			m.set(b.id, { folded, digest: folded ? this.digestOf(b) : "", grouped: this.groupWire.has(b.id) });
+		}
+		return m;
+	}
+
+	private snapshotFoldedConductorGroups(): Map<string, GroupSnapshot> {
+		const m = new Map<string, GroupSnapshot>();
+		for (const g of this.groups) {
+			if (!g.folded || (g.by !== "auto" && g.by !== "conductor")) continue;
+			m.set(g.id, { memberIds: [...g.memberIds], digest: g.digest });
+		}
+		return m;
+	}
+
+	private sameGroupSnapshot(a: GroupSnapshot | undefined, b: Group): boolean {
+		return !!a && a.digest === b.digest && a.memberIds.length === b.memberIds.length && a.memberIds.every((id, i) => id === b.memberIds[i]);
+	}
+
+	private recordConductorTransitions(before: Map<string, FoldSnapshot>, beforeGroups: Map<string, GroupSnapshot>): void {
+		const rows: DecisionEvent[] = [];
+		const counts = { fold: 0, replace: 0, restore: 0, group: 0, ungroup: 0 };
+		const afterGroups = this.snapshotFoldedConductorGroups();
+		for (const g of this.groups) {
+			if (!g.folded || (g.by !== "auto" && g.by !== "conductor")) continue;
+			if (this.sameGroupSnapshot(beforeGroups.get(g.id), g)) continue;
+			rows.push({
+				n: this.decisionN++,
+				at: Date.now(),
+				by: "auto",
+				action: "group",
+				ids: [g.id],
+				detail: `${g.memberIds.length} blocks`,
+				turn: this.get(g.memberIds[0])?.turn,
+				kind: "group",
+			});
+			counts.group++;
+		}
+		for (const [id, snap] of beforeGroups) {
+			if (afterGroups.has(id)) continue;
+			rows.push({
+				n: this.decisionN++,
+				at: Date.now(),
+				by: "auto",
+				action: "ungroup",
+				ids: [id],
+				detail: `${snap.memberIds.length} blocks`,
+				turn: this.get(snap.memberIds[0])?.turn,
+				kind: "group",
+			});
+			counts.ungroup++;
+		}
+		for (const b of this.blocks) {
+			const prev = before.get(b.id);
+			const folded = this.isFolded(b);
+			const digestText = folded ? this.digestOf(b) : "";
+			if (!prev) continue;
+			if (prev.grouped || this.groupWire.has(b.id)) continue;
+			if (prev.folded === folded && prev.digest === digestText) continue;
+			let action: DecisionAction;
+			if (!prev.folded && folded) action = "fold";
+			else if (prev.folded && !folded) action = "restore";
+			else action = "replace";
+			if (action === "fold") counts.fold++;
+			else if (action === "restore") counts.restore++;
+			else if (action === "replace") counts.replace++;
+			rows.push({
+				n: this.decisionN++,
+				at: Date.now(),
+				by: "auto",
+				action,
+				ids: [b.id],
+				detail: label(b),
+				turn: b.turn,
+				kind: b.kind,
+			});
+		}
+		if (!rows.length) return;
+		this.prependDecisionEvents(rows.reverse());
+		const parts: string[] = [];
+		if (counts.fold) parts.push(`folded ${counts.fold} block${counts.fold === 1 ? "" : "s"}`);
+		if (counts.replace) parts.push(`updated ${counts.replace} block${counts.replace === 1 ? "" : "s"}`);
+		if (counts.restore) parts.push(`restored ${counts.restore} block${counts.restore === 1 ? "" : "s"}`);
+		if (counts.group) parts.push(`grouped ${counts.group} group${counts.group === 1 ? "" : "s"}`);
+		if (counts.ungroup) parts.push(`ungrouped ${counts.ungroup} group${counts.ungroup === 1 ? "" : "s"}`);
+		this.emit("auto", "conductor update", parts.join(" · "));
+	}
+
 	/**
 	 * A block inside a FOLDED group is controlled by its parent tile, not per-block
 	 * overrides: the group's collapse already decides its fate (ADR 0006 §2). Refuse
@@ -1120,6 +1287,7 @@ export class AccordionStore {
 		// engine digest (with its {#code FOLDED} recovery tag), not stale conductor text.
 		b.subst = undefined;
 		this.emit(by, "folded", label(b));
+		this.recordDecision(by, "fold", [id], label(b));
 		this.refold();
 		if (by === "you") this.onHumanOverride?.([id], "folded");
 	}
@@ -1138,6 +1306,7 @@ export class AccordionStore {
 		b.by = by;
 		b.subst = undefined; // human override clears conductor-owned content
 		this.emit(by, "unfolded", label(b));
+		this.recordDecision(by, "unfold", [id], label(b));
 		this.refold();
 		if (by === "you") this.onHumanOverride?.([id], "unfolded");
 	}
@@ -1158,6 +1327,7 @@ export class AccordionStore {
 		b.by = "you";
 		b.subst = undefined; // human override clears conductor-owned content
 		this.emit("you", "pinned", label(b));
+		this.recordDecision("you", "pin", [id], label(b));
 		this.refold();
 		this.onHumanOverride?.([id], "pinned");
 	}
@@ -1169,6 +1339,7 @@ export class AccordionStore {
 		b.override = null;
 		b.by = "you";
 		this.emit("you", "unpinned", label(b));
+		this.recordDecision("you", "unpin", [id], label(b));
 		this.refold();
 		this.onHumanOverride?.([id], "unpinned");
 	}
@@ -1199,6 +1370,7 @@ export class AccordionStore {
 		// prune it — would survive reset still folded, silently contradicting "all blocks to auto".
 		if (this.groups.length) this.groups = [];
 		this.emit("you", "reset", "all blocks to auto");
+		this.recordDecision("you", "reset", [], "all blocks to auto");
 		this.refold();
 		// Empty id list = "everything changed"; the conductor reconciles from the next update.
 		this.onHumanOverride?.([], "reset");
@@ -1324,7 +1496,10 @@ export class AccordionStore {
 		// A conductor group is recreated EVERY pass, so emitting "grouped" each time would spam
 		// the activity log — exactly as conductor block-folds emit nothing per fold. Only the
 		// human's one-time group action is logged.
-		if (by === "you") this.emit(by, "grouped", `${memberIds.length} blocks`);
+		if (by === "you") {
+			this.emit(by, "grouped", `${memberIds.length} blocks`);
+			this.recordGroupDecision(by, "group", g, `${memberIds.length} blocks`);
+		}
 		this.refold();
 		return g;
 	}
@@ -1335,6 +1510,7 @@ export class AccordionStore {
 		if (!g) return;
 		this.groups = this.groups.filter((x) => x.id !== id);
 		this.emit(by, "ungrouped", `${g.memberIds.length} blocks`);
+		this.recordGroupDecision(by, "ungroup", g, `${g.memberIds.length} blocks`);
 		this.refold();
 	}
 	foldGroup(id: string, by: Actor = "you"): void {
@@ -1344,6 +1520,7 @@ export class AccordionStore {
 		g.folded = true;
 		this.groups = [...this.groups];
 		this.emit(by, "group folded", `${g.memberIds.length} blocks`);
+		this.recordGroupDecision(by, "fold-group", g, `${g.memberIds.length} blocks`);
 		this.refold();
 	}
 	unfoldGroup(id: string, by: Actor = "you"): void {
@@ -1358,6 +1535,7 @@ export class AccordionStore {
 		g.folded = false;
 		this.groups = [...this.groups];
 		this.emit(by, "group unfolded", `${g.memberIds.length} blocks`);
+		this.recordGroupDecision(by, "unfold-group", g, `${g.memberIds.length} blocks`);
 		this.refold();
 	}
 	toggleGroup(id: string, by: Actor = "you"): void {

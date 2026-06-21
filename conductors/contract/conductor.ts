@@ -233,6 +233,112 @@ export type ClampReason =
  */
 export type HostCapabilityId = "complete" | "countTokens" | "digest" | "compress";
 
+// ─── Optional diagnostics (display-only) ────────────────────────────────────
+
+/**
+ * Optional structured payload a conductor may place in `ConductorStatusMessage.details`
+ * or `ConductorHost.setStatus(..., details)`. This is deliberately not part of the
+ * steering contract: commands remain the only way a conductor changes context, and
+ * every field here is human-facing observability that a host may render or ignore.
+ *
+ * All properties are optional so simple conductors can expose only a one-line status
+ * while richer first-party conductors can power a dashboard without becoming a special
+ * case in the app.
+ */
+export interface ConductorDiagnostics {
+	health?: ConductorHealthSnapshot;
+	unitTrace?: ConductorFoldUnitTrace[];
+	factLedger?: ConductorFactLedgerEntry[];
+	relevanceTOC?: ConductorRelevanceTOCEntry[];
+	proactiveUnfolds?: ConductorProactiveUnfold[];
+	calibration?: ConductorCalibrationSnapshot;
+	caches?: ConductorCacheSnapshot;
+}
+
+export interface ConductorHealthSnapshot {
+	foldTargetCalibrated?: number;
+	foldTargetThisTurn?: number;
+	foldTargetBand?: { min: number; max: number };
+	assembledTokens?: number;
+	budgetTokens?: number;
+	contextWindow?: number | null;
+	pressure?: "comfortable" | "normal" | "tight" | string;
+}
+
+export type ConductorFoldLevel = 0 | 1 | 2 | 3;
+
+export interface ConductorFoldUnitTrace {
+	id: string;
+	blockIds: string[];
+	kindWeight?: number;
+	overlap?: number;
+	recency?: number;
+	score?: number;
+	stage?: "keyword" | "embed" | "rerank" | 1 | 2 | 3;
+	threshold?: number;
+	fullTokens?: number;
+	foldedTokens?: number;
+	trimTokens?: number;
+	trimEligible?: boolean;
+	level?: ConductorFoldLevel;
+	fromLevel?: ConductorFoldLevel;
+	eligible?: boolean;
+	reason?: string;
+}
+
+export interface ConductorFactLedgerEntry {
+	category: "exact_values" | "decisions" | "commands" | "errors" | "paths" | string;
+	value: string;
+	turn?: number;
+	sourceId?: string;
+}
+
+export interface ConductorRelevanceTOCEntry {
+	turn: number;
+	score?: number;
+	label: string;
+	blockIds?: string[];
+}
+
+export interface ConductorProactiveUnfold {
+	id?: string;
+	blockId?: string;
+	blockIds?: string[];
+	turn?: number;
+	reason?: string;
+}
+
+export interface ConductorCalibrationEvent {
+	turn: number;
+	from: number;
+	to: number;
+	corrections?: number;
+	reason: "correction" | "decay" | "hold" | "pinned" | string;
+}
+
+export interface ConductorCalibrationSnapshot {
+	events?: ConductorCalibrationEvent[];
+	needed?: number;
+	harmless?: number;
+	neededRate?: number;
+}
+
+export interface ConductorCacheSnapshot {
+	summary?: ConductorCacheStats;
+	embedding?: ConductorCacheStats;
+	rerank?: ConductorCacheStats;
+	latestProviderError?: string;
+}
+
+export interface ConductorCacheStats {
+	size?: number;
+	pending?: number;
+	provider?: string;
+	calls?: number;
+	errors?: number;
+	latestError?: string;
+}
+
 /**
  * A provider-agnostic request to the host to run a model completion off to the side.
  * This is NEVER on the `conduct()` hot path — it is fire-and-forget from the conductor's
