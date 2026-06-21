@@ -18,6 +18,7 @@
 	import ContextMap from "$lib/ui/map/ContextMap.svelte";
 	import Inspector from "$lib/ui/map/Inspector.svelte";
 	import Icon from "$lib/ui/Icon.svelte";
+	import Logo from "$lib/ui/Logo.svelte";
 
 	let selectedId = $state<string | null>(null);
 	let manualPort = $state(DEFAULT_PORT);
@@ -199,7 +200,7 @@
 				<header class="topbar">
 					<div class="brand">
 						<span class="brand-icon">
-							<Icon name="accordion" size={20} stroke={1.75} />
+							<Logo size={22} />
 						</span>
 						<span class="wordmark">Accordion</span>
 						{#if foldAlarm.active}
@@ -267,7 +268,7 @@
 		{:else}
 			<div class="fallback">
 				<div class="hero-plate">
-					<Icon name="accordion" size={40} stroke={1.5} />
+					<Logo size={44} />
 				</div>
 				<h1 class="hero-title">Accordion</h1>
 				<p class="tagline">Your session, intact.</p>
