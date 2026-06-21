@@ -30,21 +30,24 @@
 	   These VALUES intentionally override the former "DO NOT CHANGE" contract: the spectrum
 	   is now the canonical block-kind palette. Names are still load-bearing — do not rename. */
 	--k-user: #044EFF;
-	--k-text: #9A9A9A;         /* Smoke — text is monochrome by brand rule */
+	--k-text: #1AA6E8;         /* brand spectrum azure — the assistant-reply spine
+	                              (a real gradient stop, distinct from the 4 kinds; not gray) */
 	--k-thinking: #B480DF;
 	--k-tool_call: #21D4C1;
 	--k-tool_result: #E19C7D;
 	/* synthesized-summary tile (sliver fold mode) — dark neutral recessed tone; distinct
-	   from --group (#2C2C2C) so the summary never collides with a collapsed group tile */
+	   from a folded group's spectrum gradient so the summary never collides */
 	--k-summary: #2A2A2A;
 
-	/* multiblock folds (groups) — MONOCHROME RECESSED (reads as folded, not live) */
-	--group: #2C2C2C;               /* recessed charcoal */
-	--group-edge: #4A4A4A;          /* Slate */
-	--group-accent: #9A9A9A;        /* Smoke — group button / highlight */
-	--group-band: rgba(154, 154, 154, 0.07);
-	--group-ink: #0A0A0A;           /* Ink text on the light smoke group button */
-	--group-accent-light: #E8E8E8;  /* hover tint for group button */
+	/* multiblock folds (groups) — the brand SPECTRUM GRADIENT made smoky over Ink
+	   ("the colors fold together into one continuous spectrum"). The canvas paints the
+	   gradient (tileDraw); DOM group surfaces use --gradient-spectrum darkened. */
+	--group: #14131C;               /* smoky fallback base (canvas uses the gradient) */
+	--group-edge: #0A0A0A;          /* crisp Ink rim around the gradient tile */
+	--group-accent: #E8E8E8;        /* Cloud — group selection rings / band edge / controls */
+	--group-band: rgba(255, 255, 255, 0.05);
+	--group-ink: #0A0A0A;           /* Ink text on the light group button */
+	--group-accent-light: #FFFFFF;  /* hover tint for group button */
 
 	/* ===== Radii (brand) ===== */
 	--radius-xs: 4px;          /* inline code chips / tiny markers (floor) */

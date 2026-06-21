@@ -1631,8 +1631,11 @@
 	/* The collapsed group tile in tile grids is now drawn on canvas (no DOM .group-tile
 	   needed there). Only .group-tile-open (the dull parent inside the band) remains DOM. */
 	.group-tile {
-		/* Kept for .group-tile-open which also uses this base. */
-		background: var(--group);
+		/* Kept for .group-tile-open which also uses this base. Folded group = the brand
+		   spectrum gradient, darkened to a smoky field over Ink (matches the canvas tile). */
+		background:
+			linear-gradient(rgba(10, 10, 10, 0.42), rgba(10, 10, 10, 0.42)),
+			var(--gradient-spectrum);
 		box-shadow:
 			inset 0 0 0 1px var(--group-edge),
 			inset 2px 2px 0 -1px color-mix(in srgb, #fff 16%, transparent),
