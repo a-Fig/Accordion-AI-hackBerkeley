@@ -365,7 +365,7 @@
 		overflow-x: hidden;
 	}
 	.dot-btn.sel {
-		background: var(--accent-soft);
+		background: color-mix(in srgb, var(--accent) 11%, transparent);
 		border-color: color-mix(in srgb, var(--accent) 40%, transparent);
 		color: var(--accent);
 	}
@@ -559,7 +559,7 @@
 		background: var(--panel-2);
 	}
 	.row.sel {
-		background: var(--accent-soft);
+		background: color-mix(in srgb, var(--accent) 11%, transparent);
 	}
 	.row.sel::before {
 		opacity: 1;
@@ -701,7 +701,7 @@
 	}
 	.row.demo.sel {
 		border-color: color-mix(in srgb, var(--accent) 50%, transparent);
-		background: var(--accent-soft);
+		background: color-mix(in srgb, var(--accent) 11%, transparent);
 	}
 	.badge {
 		flex: 0 0 auto;
