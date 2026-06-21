@@ -284,6 +284,19 @@ the conductor).
     reconnect. Locks `human-steering`; keeps `agent-unfold` open as a compaction veto;
     `recall` always works. See [docs/thermocline-design.html](docs/thermocline-design.html) /
     [ADR 0015](docs/adr/0015-thermocline-conductor.md).
+  - `code-skeleton/` — in-process. Replaces a large code-file READ (`tool_result`) with a
+    deterministic structural SKELETON — imports/exports, types, class/function signatures,
+    docstrings; bodies elided — at ~1/5 the tokens, instead of a generic one-line digest. The
+    skeleton is REVERSIBLE: emitted via `replace` with the new additive **`ReplaceCommand.recoverable`**
+    flag, so the engine bakes in the `{#code FOLDED}` tag (single source of truth — `store.substOne`)
+    and the agent can `unfold`/`recall` the full source. The reversible answer to naive compaction.
+    Precision-gated classification (`classify.ts`) rejects grep dumps / images / markdown / JSON /
+    directory listings / `tail -f` streams and strips `cat -n` / `exec_command` wrappers; the
+    deterministic, dependency-free skeletonizer (`skeletonize.ts`, mask-based, per-language —
+    ts/js/py/svelte/css/rust/…) keeps the folded prefix cache-warm. Collaborative (no locks);
+    3-pass budget (skeletonize → generic-fold → downgrade) never worse than the built-in at meeting
+    it. Writes can't be skeletonized (their content lives in a non-foldable `tool_call`). See
+    [ADR 0016](docs/adr/0016-code-skeleton-conductor.md).
 
 ## Visual grammar (consistent across ALL views)
 
