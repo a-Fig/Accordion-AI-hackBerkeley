@@ -97,7 +97,23 @@ plan the app returns. Decisions live in ADRs: [0001](docs/adr/0001-pi-live-integ
   (5 s heartbeat; deleted on shutdown). `/accordion` writes `~/.accordion/focus.json`.
 - **Native discovery (Rust):** `app/src-tauri/src/lib.rs` — `list_sessions`,
   `reap_session`, `take_focus_request`, `focus_window`. A browser tab can't read the
-  registry, which is why discovery is desktop-only (browser dev has a manual-port box).
+  registry, so **multi-session discovery** (the Sessions list / switcher) is desktop-only.
+- **Browser-served mode (PRs #81 + #84).** The extension also runs an **HTTP server on the
+  SAME ephemeral port** as the WS, serving the SvelteKit build so the UI opens in a plain
+  browser — no desktop app. `resolveClientRoot()` (`accordion.ts`) prefers
+  `extension/dist/client` (published layout, copied by `build-client.mjs`) and falls back
+  to `../app/build` (dev). `/accordion` prints `Browser: http://127.0.0.1:<port>/?token=<tok>`.
+  **Static serving is token-gated** (query `?token` → `HttpOnly; SameSite=Strict` cookie);
+  the **WS stays unauthenticated** so the Tauri app's tokenless dial is unaffected. The
+  served page hits the ungated `/__accordion/meta` (`{served, sessionId, protocolVersion}`)
+  and **auto-connects to its own origin port** — so browser mode is naturally
+  **single-session** (each pi serves its own UI on its own port; no registry read needed).
+  The left rail renders in the browser too, **trimmed** to the one connected session +
+  Demo + Settings (no source toggle, no multi-session list) via `SessionsSidebar`'s
+  additive `browserServed` prop. **Dev footgun:** a stale `extension/dist/client` shadows a
+  freshly-rebuilt `../app/build` (resolve order prefers it) — delete `extension/dist` after
+  any `build:client`. Browser-served is dev-checkout-only today; `npm publish` bundling is
+  a follow-up.
 
 **Read-only Claude Code browsing (separate from the live link).** The source switcher's
 *Claude Code* mode lists static transcripts under `~/.claude/projects/<proj>/*.jsonl`.
@@ -354,8 +370,12 @@ cd extension && node smoke.mjs   # drives the extension via jiti + a real WS cli
 cd app/src-tauri && cargo check  # the native discovery layer (PowerShell — see below)
 ```
 
-Live discovery (the Sessions sidebar) only works in the **desktop** app — the browser
-build can't read `~/.accordion/`, so it falls back to a manual-port Connect box.
+Live **multi-session** discovery (the Sessions list) only works in the **desktop** app — a
+plain browser can't read `~/.accordion/`. Two browser paths exist: (1) **browser-served** —
+a running pi extension serves the app on its WS port and the page **auto-connects to that one
+session** (open the URL from `/accordion`; single-session, no manual entry); (2) **browser
+dev** (`npm run dev` on :1420) — no extension serving, so it falls back to the manual-port
+Connect box. See the **Browser-served mode** bullet under "The live link" above.
 
 Environment gotchas (Windows, this repo's usual setup):
 
