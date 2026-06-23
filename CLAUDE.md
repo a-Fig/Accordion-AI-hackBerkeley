@@ -1,405 +1,155 @@
 # CLAUDE.md — Accordion
 
-Guidance for AI coding sessions in this repo. Read [VISION.md](VISION.md) for the
-product north star and [README.md](README.md) for the short pitch. This file is
-about **how to work in the code**, not what the product is.
+Guidance for AI coding sessions. [VISION.md](VISION.md) = product north star · [README.md](README.md) = short pitch.
 
 ## Key URLs
 
 - **Marketing site:** https://get-accordion.dev/
-- **Public GitHub repo:** https://github.com/a-Fig/Accordion
-- **Private GitHub repo:** https://github.com/a-Fig/accordion-private
+- **Public repo:** https://github.com/a-Fig/Accordion
+- **Private repo:** https://github.com/a-Fig/accordion-private
 
-## Where the live work is
+## Terminology
 
-The active surface is the **desktop app** in `app/` — a Tauri 2 + SvelteKit window
-that visualizes an agent's context window. A **single route** (`routes/+page.svelte`):
-the **Map** app, an abstraction-first view. In the desktop app it's a shell — a
-**`SessionsSidebar`** (a top **source switcher** — live pi sessions via the pull model,
-*or* read-only **Claude Code** transcripts browsed from `~/.claude/projects`; minimizable
-to a slim icon rail, plus a pinned **Demo session** that loads the bundled sample) + the
-session view:
-`MapHeader` (composition strip + budget) + `ContextMap` + `Inspector` (on-demand text
-panel). `ContextMap` carries a **2-way segmented control: `Map` | `Transcript`** — **Map**
-is the abstraction (the uniform dice-square grid) and **Transcript** is the concretion (a
-readable, scrollable full-chat view: blocks as cards in conversation order, each with a
-kind-colored left spine and a role label — You / Assistant / Thinking / Tool call / Tool
-result; live blocks show full text, folded blocks show the exact `{#code FOLDED}` digest the
-agent sees; inline Fold/Unfold per card + double-click to fold, single click = inspect).
-The old **Classic** view (summary/timeline of `BlockCard`s) and the earlier 3-way
-**Grid / Turns / Chains** zoom switch were both removed; their components
-(`ContextSummary` / `ContextTimeline` / `Timeline` / `BlockCard`) and `chains.ts` are gone.
+- **pi** — the CLI AI coding harness whose context window Accordion visualizes. Not an Accordion product; it's the tool the user runs. `extension/accordion.ts` is a pi plugin that hooks into pi's `context` hook (fires before each model call).
+- **block** — atomic unit of context: one chunk of a single kind (`user`, `text`, `thinking`, `tool_call`, or `tool_result`). See `engine/types.ts → Block`.
+- **turn** — one user message plus all assistant content (thinking, text, tool calls, tool results) that follows it before the next user message.
+- **fold / folding** — replacing a block's content in-place with a short digest; the block stays on the wire to the LLM in compressed form. Never deletion. Always reversible.
+- **held** — a block carrying a human override (manual pin, fold, or unfold). `ViewBlock.held = true`; the host refuses conductor commands on held blocks unless the conductor holds a `human-steering` involvement lock.
+- **conductor** — a pluggable context-management strategy (`conduct(view) → Command[]`). Decides which blocks to fold, group, replace, pin, etc. between turns.
+- **the wire** — the messages array sent to the LLM provider. "Wire-valid" = the outgoing array is well-formed. Distinct from the WebSocket between the app and the pi extension (that's the live link / accordion protocol).
+- **browser-served** — mode where the pi extension HTTP-serves the SvelteKit UI on the same ephemeral port as the WS. Single-session; no Tauri desktop app required.
+- **CC** — Claude Code (as in "CC transcript", "CC browsing"). Read-only mode; sessions loaded from `~/.claude/projects/`.
 
-The current pi extension is **`extension/accordion.ts`** (the live link — see below).
-The old root `src/` POC and `visualizer/` have been removed from the repo.
+## Codebase map
 
-## The engine is the source of truth — use it, don't change it
+| path | what |
+|------|------|
+| `app/` | Tauri 2 + SvelteKit desktop app — the active surface |
+| `app/src/lib/engine/` | The model: types, parser, store — single source of truth |
+| `app/src/lib/live/` | WS client, session discovery, CC transcript browsing |
+| `app/src-tauri/src/lib.rs` | Native Rust: session discovery + `~/.claude` reads |
+| `extension/accordion.ts` | Live pi extension — WS server + HTTP server (browser-served mode) |
+| `conductors/` | All context strategies — see [conductors/README.md](conductors/README.md) |
+| `conductors/contract/` | Shared conductor contract (dependency-free) |
+| `docs/` | ADRs + developer references |
+| `brand/accordion-brand-kit/brand.md` | Brand colors + typography source of truth |
 
-`app/src/lib/engine/` owns the model. The UI only renders it and calls its actions.
+**App structure.** One route (`routes/+page.svelte`), the **Map** shell: `SessionsSidebar` (source switcher — live pi sessions or read-only Claude Code transcripts) + `MapHeader` (composition strip + budget) + `ContextMap` + `Inspector`. `ContextMap` has a 2-way toggle: **Map** (uniform dice-square grid) | **Transcript** (scrollable full-chat; blocks as cards, kind-colored left spine; live blocks show full text, folded blocks show the exact `{#code FOLDED}` digest the agent sees; double-click to fold, single click = inspect). Arrow keys traverse blocks (←/→ = prev/next, ↑/↓ = ±one row).
 
-- `types.ts` — `Block { id, kind, turn, order, text, tokens, toolName?, callId?, override, autoFolded, by }`.
-  Kinds: `user · text · thinking · tool_call · tool_result`.
-- `parse.ts` — pi / Claude Code JSONL → typed blocks. **`tool_call` and `tool_result`
-  are separate blocks sharing a `callId`** (call = durable "what it did"; result =
-  "what it saw", decays fast). An assistant message's thinking/text/call share an
-  `id` prefix before `:`.
-- `store.svelte.ts` — `AccordionStore` (Svelte runes). API: `blocks`, `budget`/`setBudget`,
-  `isFolded(b)`, `effTokens(b)`, `digestOf(b)`, `toggle/fold/unfold/pin/unpin(id)`,
-  `resetAll()`, `liveTokens`, `fullTokens`, `savedTokens`, `foldedCount`, `overBudget`,
-  `log`, `meta`, and `appendBlocks(blocks)` (used by the live link to stream new
-  blocks in). Exposed as `window.__store` for debugging.
-  - **Protected working tail:** `protectTokens` (default `20_000`) reserves the newest
-    ~N tokens of context so the auto-folder never touches recent reasoning. `protectedFromIndex`
-    walks back from the newest block summing full `tokens` toward that target, but refuses
-    to pull in the next older block if doing so would exceed a strict 25% whole-block
-    overflow cap (except the newest block, which is always protected even if it alone
-    exceeds the cap; `0` if the whole session fits under the target/cap).
-    `isProtected(b)` and `protectedTokens` are the reads. `refold()` only builds fold
-    candidates from blocks with `i < protectedFromIndex` — i.e. older than the tail. Manual
-    `fold()` is also refused in the protected tail, and a folded block that later becomes
-    protected heals back to live; `pin()` remains allowed because it keeps content open.
-    `setProtect(n)` resizes the tail and re-folds — wired to an on-bar draggable handle
-    on the composition strip (0–60k, step 2k; the real refold is deferred to pointer-release
-    so dragging doesn't re-fold continuously). **ADR 0011 `tail-size` lock:** under an exclusive
-    conductor holding the `tail-size` lock the host floor described above is lifted (`protectedFromIndex`
-    returns `blocks.length`, collapsing the grid to one box) and `setProtect` is a no-op
-    — the conductor may fold any block, including recent reasoning. Absent the lock the tail is
-    host-absolute exactly as described. See `protectedFromIndex` / `setProtect` in `store.svelte.ts` and
-    [ADR 0011](docs/adr/0011-conductor-involvement-locks.md).
-- `tokens.ts` (chars/4 estimate) · `digest.ts` (what a kind collapses to when folded).
+## Engine — single source of truth
 
-Folding is **content substitution, never removal** — provider-safe and fully reversible.
+`app/src/lib/engine/` owns the model. **The UI only renders and calls its actions — never reach around it.**
 
-## The live link (`app/src/lib/live/` + `extension/`)
+- `types.ts` — `Block { id, kind, turn, order, text, tokens, toolName?, callId?, override, autoFolded, by }`. Kinds: `user · text · thinking · tool_call · tool_result`
+- `parse.ts` — pi / Claude Code JSONL → typed blocks. `tool_call` and `tool_result` are separate blocks sharing a `callId`. An assistant message's thinking/text/call blocks share an `id` prefix before `:`
+- `store.svelte.ts` — `AccordionStore` (Svelte runes); exposed as `window.__store`. `appendBlocks(blocks)` is the streaming seam used by the live link to add new blocks. **Protected working tail** (`protectTokens`, default `20_000`): `protectedFromIndex` marks the first block in the tail; both auto- and manual-`fold()` are refused inside it; a block that was auto-folded before entering the tail heals back to live; `pin()` remains allowed. `setProtect(n)` resizes and re-folds, wired to an on-bar draggable handle. Under the `tail-size` involvement lock (ADR 0011), the tail floor is lifted — the conductor may fold any block
+- `tokens.ts` — chars/4 estimate · `digest.ts` — what a kind collapses to when folded
 
-How the app attaches to a *running* pi session and (eventually) steers its context.
-Two halves talk over a loopback WebSocket; **"GUI drives, extension is thin"** — the
-extension makes no folding decisions, it streams pi's messages and applies whatever
-plan the app returns. Decisions live in ADRs: [0001](docs/adr/0001-pi-live-integration.md)
-(the loop) and [0002](docs/adr/0002-pull-connection-model.md) (how they find each other).
+**Folding is content substitution, never removal** — provider-safe and fully reversible.
 
-- **Shared contract — imported by *both* sides** (extension via relative path, app via
-  `$lib`), so the wire and safety rules have one home. Keep these dependency-free /
-  Node-safe (no Svelte, no `$state`):
-  - `protocol.ts` — wire messages (`hello` / `sync` / `plan`), `WireBlock`, `FoldOp`,
-    `PROTOCOL_VERSION`. Block ids encode message location (`m<i>:p<j>`, `m<i>:r`, …).
-  - `mapping.ts` — `linearize(messages)` (mirrors `engine/parse`) and the **pure,
-    kind-checked** `applyPlan(messages, ops)` (a `tool_call` is never folded → never
-    orphans its result; the engine is the single foldability gate so no wire-side position backstop is needed — the engine never folds a protected block).
-  - `registry.ts` — the **discovery** contract: `SessionEntry`, `FocusRequest`,
-    `isLiveEntry`, and the `~/.accordion/` layout. The Tauri Rust layer mirrors these
-    constants — change them in lockstep.
-- **App side (Svelte):** `liveClient.svelte.ts` (WS *client* → builds the live store),
-  `discovery.svelte.ts` (polls native discovery, reaps stale sessions, handles focus),
-  rendered by `ui/live/SessionsSidebar.svelte` on the `/map` shell.
-- **Extension side (Node):** `extension/accordion.ts` hosts the WS *server* on an
-  **ephemeral** port and advertises the session in `~/.accordion/sessions/<id>.json`
-  (5 s heartbeat; deleted on shutdown). `/accordion` writes `~/.accordion/focus.json`.
-- **Native discovery (Rust):** `app/src-tauri/src/lib.rs` — `list_sessions`,
-  `reap_session`, `take_focus_request`, `focus_window`. A browser tab can't read the
-  registry, so **multi-session discovery** (the Sessions list / switcher) is desktop-only.
-- **Browser-served mode (PRs #81 + #84).** The extension also runs an **HTTP server on the
-  SAME ephemeral port** as the WS, serving the SvelteKit build so the UI opens in a plain
-  browser — no desktop app. `resolveClientRoot()` (`accordion.ts`) prefers
-  `extension/dist/client` (published layout, copied by `build-client.mjs`) and falls back
-  to `../app/build` (dev). `/accordion` prints `Browser: http://127.0.0.1:<port>/?token=<tok>`.
-  **Static serving is token-gated** (query `?token` → `HttpOnly; SameSite=Strict` cookie);
-  the **WS stays unauthenticated** so the Tauri app's tokenless dial is unaffected. The
-  served page hits the ungated `/__accordion/meta` (`{served, sessionId, protocolVersion}`)
-  and **auto-connects to its own origin port** — so browser mode is naturally
-  **single-session** (each pi serves its own UI on its own port; no registry read needed).
-  The left rail renders in the browser too, **trimmed** to the one connected session +
-  Demo + Settings (no source toggle, no multi-session list) via `SessionsSidebar`'s
-  additive `browserServed` prop. **Dev footgun:** a stale `extension/dist/client` shadows a
-  freshly-rebuilt `../app/build` (resolve order prefers it) — delete `extension/dist` after
-  any `build:client`. Browser-served is dev-checkout-only today; `npm publish` bundling is
-  a follow-up.
+**Agent self-unfold / recall.** Every folded block's digest is prefixed `{#<code> FOLDED}` (a short stateless hash of the block id; only foldable kinds — `text/thinking/tool_result` — are tagged). The extension registers two pi tools: `unfold` (agent passes codes; matching blocks become standing-open, sticky, provenance `"agent"`; the agent can only unfold a block that is actually folded — it cannot downgrade a human pin; lockable under `agent-unfold`) and `recall` (reads a folded block's content as a tool result without mutating the view — **never lockable**, analogous to `read_file`). See [ADR 0005](docs/adr/0005-agent-unfold.md).
 
-**Read-only Claude Code browsing (separate from the live link).** The source switcher's
-*Claude Code* mode lists static transcripts under `~/.claude/projects/<proj>/*.jsonl`.
-Two Rust commands own this (`lib.rs`): `list_claude_sessions` (walks the projects dir,
-skips nested `subagents/`, newest-50 by mtime, head-reads ≤96 KB to pull a title —
-`ai-title`→`summary`→first-user-msg — plus cwd/project) and `read_claude_session` (a
-path-confined read used to load **and tail** the file — the JS `fs` plugin's scope does
-*not* cover programmatic reads of `~/.claude`, only dialog-picked files, so Rust owns
-that access). App side: `live/claude.ts` (the `ClaudeCodeSession` type + guard) and
-`live/claudeDiscovery.svelte.ts` (a 3 s poll that runs only while the CC tab is active).
-A CC session loads through the engine like the demo, so local fold/unfold/pin/peek all
-work as a personal lens — but `session.readOnly` is set (the `MapHeader` shows a
-**READ-ONLY** badge) and there is no wire to steer. **Known limitation:** an *actively
-appended* CC session re-runs `_load` on each tail tick, which rebuilds the store and
-drops manual folds; static transcripts (the common case) never re-load. The durable fix
-is an incremental `appendBlocks` tail like the WS path.
+## Live link
 
-**RULE — preview/read-only is NOT a more permissive mode.** Preview, demo, and read-only
-Claude Code sessions obey EVERY rule the steering path does — the same foldability
-predicate, the same UI affordances, the same token accounting, the same group/conductor
-constraints. The *only* difference between preview and steering is that no plan is ever
-written to the agent's wire; the agent's context is never altered. Everything else is
-byte-identical. The UI must NEVER render a fold, group, or state that the steering path
-could not itself produce — if the wire would refuse it, the UI must refuse it too, in
-every mode. "There's no agent on the other end, so anything goes" is a forbidden line of
-reasoning: the app is a source of truth, and a source of truth does not relax its rules
-when no one is watching. The foldability gate lives in ONE place (the engine) and is the
-single predicate shared by `fold()`/`isFolded`/`computeFoldOps` — never a stricter rule on
-the wire than in the view. Involvement locks ([ADR 0011](docs/adr/0011-conductor-involvement-locks.md))
-obey the same rule: a locked control is locked in every mode — preview and read-only are not
-exemptions.
+`app/src/lib/live/` + `extension/accordion.ts`. **GUI drives, extension is thin** — the extension streams pi's messages and applies whatever plan the app sends; it makes no folding decisions. Multi-session discovery (the Sessions list / switcher) is **desktop-only** — a plain browser can't read `~/.accordion/`.
 
-**Invariants (don't break):** discovery I/O is best-effort and **never blocks or alters
-a model call**; no GUI / reply timeout / empty plan ⇒ messages pass through untouched;
-no disk I/O on the `context` (pre-model-call) hook. **The engine is now on (M2, ADR
-0004) but folding the live agent is OPT-IN and OFF by default** (`folding.enabled`, a
-header toggle). Disarmed, the GUI still replies with an empty plan — M1 behavior, no
-model call altered. Armed, `computePlan` mirrors the engine's fold decisions into ops
-via `computeFoldOps` (`plan.ts`), guarded so only **durable-id** `text`/`thinking`/
-`tool_result` blocks are ever folded (`isDurableId`; `applyPlan` enforces the same).
-The out-of-band **completion relay** (`completeRequest` / `completeResult`, pi wire v5)
-is a separate channel: the GUI sends it when a conductor calls `host.complete()`, the
-extension runs the model call and returns the raw result, and the GUI passes it back to
-the conductor. This is **never on the `context` hook path** — it runs on a side channel
-completely outside the `sync→plan→apply` loop and must never block or alter the agent's
-own model call. The extension stays thin: it runs exactly the completion it is handed and
-decides nothing (strategy lives in the conductor, in the GUI).
+**Browser-served mode.** The extension also HTTP-serves the SvelteKit build on the same ephemeral WS port. `/accordion` prints the browser URL; the page auto-connects to that one session — single-session, no desktop app needed. Static serving is token-gated; the WS stays unauthenticated so the Tauri app's tokenless dial is unaffected. Left rail is trimmed in browser mode (`browserServed` prop on `SessionsSidebar`). **Dev footgun:** a stale `extension/dist/client` shadows `../app/build` (resolve order prefers it) — delete `extension/dist` after any `build:client`.
 
-**M3 — agent self-unfold ([ADR 0005](docs/adr/0005-agent-unfold.md)):** the engine's
-`digest()` now prefixes every folded block's digest with `{#<code> FOLDED}`, where
-`<code>` is a short stateless hash of the durable block id (`foldCode` — a raw id is a
-UUID/timestamp, too noisy to repeat). This is the single source of truth: the GUI renders
-the exact string the agent receives, and token accounting includes the tag — no separate
-wire representation, no drift (only foldable kinds — text/thinking/tool_result — are tagged,
-since only those are ever sent folded). The extension registers an `unfold` pi tool: the
-agent calls `unfold({codes: [...]})` with code(s) copied from the tags, the GUI resolves
-each code to its folded block(s) (a rare hash collision restores all matches) and marks
-them unfolded (sticky, provenance `"agent"`), and the full content returns on the agent's
-**next turn** (state-change-only; no content echo this cut). The agent can only unfold a
-block that is actually folded — it can't downgrade a human pin. Agent unfolds show in the
-activity log; the human can re-fold them. The skill `accordion-context-folding` is
-auto-exposed via `resources_discover` — no manual loading. **ADR 0011 ships a sibling agent tool `recall`** — an unblockable read that returns a folded
-block's full content as a tool result (like `read_file`) without mutating the standing view:
-no override is created, the block stays folded in context (vs `unfold`, which forces the block
-standing-open and is lockable under `agent-unfold`). Symmetry: **Peek : Human :: Recall : Agent.**
-The conductor then manages the resulting tool-result block like any other. `recall` sits beside
-`unfold` in `extension/accordion.ts` (see `resolveRecall` in `app/src/lib/live/plan.ts`) and is
-**never lockable**. Both tools are kept for now; `unfold` is potentially transitional.
+**Shared contract** (dependency-free, no Svelte — imported by both sides):
+- `protocol.ts` — wire messages (`hello / sync / plan`), `WireBlock`, `FoldOp`, `PROTOCOL_VERSION`
+- `mapping.ts` — `linearize(messages)` and pure `applyPlan(messages, ops)`. `tool_call` is never folded — can never orphan its result
+- `registry.ts` — `~/.accordion/` layout and session/focus shapes. **The Tauri Rust layer mirrors these constants — change them in lockstep**
 
-**Known characteristic:** the view syncs on pi's `context` hook, which fires *before*
-each model call — so an assistant reply is only seen at the *next* model call (i.e. the
-next user turn for a plain reply; immediately for tool-using turns). Closing that gap
-(a post-turn view sync) is a planned follow-up.
+**Invariants (don't break):**
+- Discovery I/O is best-effort; **never blocks or alters a model call**
+- No GUI / reply timeout / empty plan → messages pass through untouched
+- No disk I/O on the `context` (pre-model-call) hook
+- The completion relay (`completeRequest / completeResult`) runs out-of-band — **never on the `context` hook path** and never blocks the agent's own model call
+- Folding the live agent is OPT-IN and OFF by default (`folding.enabled`, a header toggle)
 
-## Conductors — pluggable context strategy ([ADR 0007](docs/adr/0007-conductor-protocol.md), [0008](docs/adr/0008-conductor-first-party-one-view.md), [0011](docs/adr/0011-conductor-involvement-locks.md))
+**Known characteristic:** the view syncs on pi's `context` hook (fires *before* each model call) — an assistant reply is only visible at the *next* model call. One-turn lag; closing it is a planned follow-up.
 
-*Which* blocks to fold / replace / group / restore / pin is owned by a **conductor**, an
-interchangeable strategy behind one contract: `conduct(view) → Command[] | null` (`Command[]`
-= complete desired state, `[]` = clear to raw, `null` = hold last state). Accordion imposes
-no strategy of its own — no conductor attached ⇒ raw context. Conductors are **first-party**
-(every one ships in this repo or a fork — no sandbox, no trust boundary); the interface
-exists to make them cheap to write, with the built-in as the worked example. The contract
-lives in the top-level **`conductors/contract/`** (both halves dependency-free / Node-safe,
-re-exported by `conductors/contract/index.ts`, imported via the `$conductors` alias):
-`conductor.ts` (the in-process shape — `ConductorView`, `ViewBlock`, the `Command` union
-`fold·replace·group·restore·pin`, `ClampReport`, the `Conductor` interface, plus
-`ConductorHost` / `CompletionRequest` / `CompletionResult` / `HostCapabilityId`) and `protocol.ts`
-(the WebSocket messages, `CONDUCTOR_PROTOCOL_VERSION = 3`, which *import* the `Command` /
-`ViewBlock` types so there is one definition). The host enforces one unconditional floor —
-**provider-validity** (the message stays sendable); **human overrides win for every control
-the conductor did NOT lock** (see involvement locks below); an unsafe command is clamped to
-nearest-safe and **reported**, never silently dropped (bug/UX rails, not protection against
-the conductor).
+**Claude Code browsing.** `list_claude_sessions` and `read_claude_session` are Rust commands — the JS `fs` plugin cannot reach `~/.claude` programmatically, so Rust owns that access. App side: `live/claude.ts` (type + guard) + `live/claudeDiscovery.svelte.ts` (3 s poll, CC tab only). CC sessions load through the engine normally but `session.readOnly` is set — `MapHeader` shows a READ-ONLY badge, and there is no wire to steer.
 
-- **Involvement locks ([ADR 0011](docs/adr/0011-conductor-involvement-locks.md)).** The
-  founding "human overrides always win" is now **conditional**: a conductor may declare a
-  **lock-set** claiming exclusive control of up to three steering controls — **`human-steering`**
-  (hand fold/unfold/pin/group/reset), **`agent-unfold`** (the agent's `unfold` tool), and
-  **`tail-size`** (the `setProtect` dial + the tail's no-fold floor). A conductor that locks
-  nothing is **collaborative** (default, today's behavior); one that declares a non-empty
-  lock-set is **exclusive**. Attaching an exclusive conductor requires a one-time consent gate
-  showing the lock table. Under a lock the human's recourse is **detach** (the kill switch) —
-  trust moves from *override* to *revocability*. The kill switch is host-enforced and
-  unconditional: detach **freezes the current folded view in place and unlocks all controls**
-  (not reset-to-raw; individual folds remain human-reversible after detach).
-  **Four things are never lockable in any conductor:** observation (peek, the live map, the
-  activity log, the budget readout); the **budget** dial; the agent's **`recall`** tool; and
-  **detach** itself. Under an exclusive conductor holding the `tail-size` lock the host's tail
-  floor is lifted — the conductor may fold any block, including recent reasoning, even to zero;
-  provider-validity remains the only unconditional host floor. Ships **additively**: the
-  `Conductor` interface gains an additive lock declaration (defaulting to locks-nothing); the
-  wire bumps `CONDUCTOR_PROTOCOL_VERSION` 2 → 3 carrying the declaration in the `conductor/hello`
-  handshake. Every existing conductor stays collaborative and the built-in golden test is
-  untouched. Host enforcement, the consent gate, and the freeze-on-detach kill switch all
-  ship in this PR (ADR 0011). Known gap: remote conductors see the consent gate
-  post-handshake, after the first plan may have already applied — cancel triggers `detach()`
-  which cleanly freezes that state.
+---
 
-- **One public view.** Every conductor — built-in included — receives the same pure-data
-  `ConductorView`: top-level `budget`, `contextWindow`, `liveTokens`, `protectedFromIndex`,
-  `protectTokens`, and `blocks: ViewBlock[]` (`id, kind, turn, order, tokens, foldedTokens,
-  toolName?, callId?, isError?, held, folded, protected, grouped, text?, preview?`). The
-  store builds it in `buildView`/`runConductor` (`store.svelte.ts`); there is no privileged
-  richer in-process snapshot.
-- **In-process is the main way.** Drop a TS class implementing `conduct(view)` in
-  `conductors/<name>/` and register one line in `conductors/index.ts`
-  (`IN_PROCESS_CONDUCTORS`: `{ id, label, create: () => new MyConductor() }`) — it appears in
-  the header switcher automatically. The **built-in** folder is the worked reference —
-  `conductors/builtin/builtin.ts` (`BuiltinConductor`, a ~15-line `conduct`), attached by
-  `AccordionStore` on construction; `store.attach(c)` / `store.detach()` swap it. Folds from
-  every conductor are attributed uniformly (`by:"auto"`; no `id === "builtin"` special-case).
-  Its byte-identical output is pinned by a golden test (`conductor.builtin.test.ts`) — don't
-  break it.
-- **Host capabilities are first-class on the `Conductor` interface.** An optional
-  `attach(host: ConductorHost)` lifecycle hook (called once before the first `conduct()`) injects
-  a `ConductorHost` handle with six methods: `can`, `complete`, `countTokens`, `digestOf`,
-  `setStatus`, `requestRerun`. `"complete"` is the first real capability — how LLM summarisation calls come to
-  Accordion: the conductor fires `host.complete(req)` off-path, holds with `null`, stashes the
-  result in instance state, then calls `host.requestRerun()` to re-run `conduct()` and emit
-  commands. `conduct()` stays synchronous throughout. `detach()` (optional) lets the conductor
-  cancel in-flight calls. A pure conductor (the built-in) omits `attach` and is unaffected. The
-  live pi extension relays `completeRequest` / `completeResult` out-of-band, outside the
-  `sync→plan→apply` model-call path. Full reference: Part 3 of `docs/conductor-protocol.md`.
-- **WebSocket is a demoted escape hatch** for a separate process / another language. The
-  conductor hosts a WS endpoint; Accordion **dials as a client** (the webview can't host a
-  server). `context/update` carries the full `ConductorView`. App side:
-  `live/conductorClient.svelte.ts` (`RemoteRunner` bridges the async WS ↔ the synchronous
-  `conduct()`), `live/conductorDiscovery.svelte.ts` (polls Rust `list_conductors` +
-  hand-configured URLs), switched via the header `ui/map/ConductorMenu.svelte` dropdown.
-  Local discovery files live at `~/.accordion/conductors/<id>.json` (5 s heartbeat; 15 s stale/reap window).
-- **Writing one:** [conductors/README.md](conductors/README.md) leads with the in-process
-  path + a minimal example; [docs/conductor-protocol.md](docs/conductor-protocol.md) is the
-  full developer reference (the `ConductorView`/`ViewBlock`/`Command` tables first, then the
-  WS lifecycle + message shapes as the escape-hatch half). External (WS) implementations live
-  in `conductors/<name>/`, any language; `conductors/recency-folder/` is the runnable wire
-  starter.
-- **All conductors live in `conductors/`** — always check that directory for the full set;
-  this doc may not name every one. Current conductors:
-  - `builtin/` — the default, in-process. Deterministic oldest-first, lowest-value-first fold.
-  - `cold-score/` — in-process. ACT-R power-law scoring + lexical pre-unfold + hysteresis.
-    See [ADR 0009](docs/adr/0009-cold-score-conductor.md).
-  - `cold-epoch/` — in-process. Cold-score's ACT-R ranking + an **epoch model**: holds a
-    byte-stable fold set inside a hysteresis band and changes it only at deliberate epochs
-    (when projected live tokens cross the high-water mark), so the folded prefix stays
-    cache-warm between epochs.
-  - `sliding-window/` — in-process. When live tokens exceed ~90% of budget, issues `group`
-    commands with `digest: null` (DROP) to hard-delete the oldest non-`user` blocks down to
-    ~70%; skips user messages. Locks `human-steering` + `agent-unfold`.
-  - `attention-folder/` — external (WS). A small LM (Qwen2.5-0.5B probe) scores attention
-    relevance; periodic hysteresis-band epochs fold the least-attended blocks. See
-    [ADR 0010](docs/adr/0010-attention-conductor.md).
-  - `garbage-collector/` — in-process. Reachability-based: mark-and-sweep from roots (protected tail + held + first `user` message) over entity/causal/message edges; folds unreachable blocks first, reachable ones only as a budget fallback. Collaborative, no instance state. See [ADR 0012](docs/adr/0012-garbage-collector-conductor.md).
-  - `recency-folder/` — external (WS). Minimal wire-protocol starter example.
-  - `compaction-naive/` — in-process. Naive compaction baseline: when the visible window
-    crosses 90% of budget it calls `host.complete` to summarize the aged region into one prose
-    summary and collapses the whole region into a single `group(digest: summary)` — the same
-    shape sliding-window uses, but with an LLM summary digest instead of `null` (drop). Lossy
-    + recursive amnesia (each pass only reads the prior summary + newly-aged blocks; originals
-    already compressed are never re-read). No fold tags — the agent cannot self-unfold. The
-    intentional foil to reversible folding. All block kinds (incl. `user` and `tool_call`) are
-    swallowed by the group; the host's whole-message snap + pair-balance keeps the result
-    wire-valid. User messages are baked VERBATIM into the summary (Claude-Code `/compact`
-    style) so human intent survives compaction; only assistant reasoning degrades. See [ADR 0013](docs/adr/0013-conductor-host-capabilities.md) / [ADR 0014](docs/adr/0014-naive-compaction-conductor.md).
-  - `thermocline/` — external (WS). Combines the attention probe (Qwen2.5-0.5B relevance
-    scores) with LLM compaction (`host.complete`) under a hard budget invariant, in
-    double-buffered epochs. Attention decides order; the budget decides depth. Fidelity ladder
-    Full → Trim → LLM-Digest (recoverable, unfold/recall-able) → Stratum (LLM holistic
-    summary, bounded re-compressible deep zone) → merged/drop. Double-gated irreversible
-    compaction (probe cold AND agent-didn't-recall, K epochs); persists the deep zone across
-    reconnect. Locks `human-steering`; keeps `agent-unfold` open as a compaction veto;
-    `recall` always works. See [docs/thermocline-design.html](docs/thermocline-design.html) /
-    [ADR 0015](docs/adr/0015-thermocline-conductor.md).
-  - `code-skeleton/` — in-process. Replaces a large code-file READ (`tool_result`) with a
-    deterministic structural SKELETON — imports/exports, types, class/function signatures,
-    docstrings; bodies elided — at ~1/5 the tokens, instead of a generic one-line digest. The
-    skeleton is REVERSIBLE: emitted via `replace` with the new additive **`ReplaceCommand.recoverable`**
-    flag, so the engine bakes in the `{#code FOLDED}` tag (single source of truth — `store.substOne`)
-    and the agent can `unfold`/`recall` the full source. The reversible answer to naive compaction.
-    Precision-gated classification (`classify.ts`) rejects grep dumps / images / markdown / JSON /
-    directory listings / `tail -f` streams and strips `cat -n` / `exec_command` wrappers; the
-    deterministic, dependency-free skeletonizer (`skeletonize.ts`, mask-based, per-language —
-    ts/js/py/svelte/css/rust/…) keeps the folded prefix cache-warm. Collaborative (no locks);
-    3-pass budget (skeletonize → generic-fold → downgrade) never worse than the built-in at meeting
-    it. Writes can't be skeletonized (their content lives in a non-foldable `tool_call`). See
-    [ADR 0016](docs/adr/0016-code-skeleton-conductor.md).
+**RULE — preview/read-only is NOT a more permissive mode.**
 
-## Visual grammar (consistent across ALL views)
+Demo, preview, and read-only Claude Code sessions obey EVERY rule the steering path does — same foldability predicate, same UI affordances, same token accounting, same group/conductor constraints. The *only* difference from steering is that no plan is written to the agent's wire. The UI must **never** render a fold, group, or state that the steering path could not itself produce. Involvement locks are locked in every mode — "there's no agent on the other end" is a forbidden line of reasoning.
 
-- **kind = color** — `user #044EFF · text #9A9A9A · thinking #B480DF · tool_call #21D4C1 · tool_result #E19C7D` (vars `--k-*` in `app.css`). These are the brand **Spectrum** identity colors (defined in `brand/accordion-brand-kit/brand.md`); changing them means updating the brand, not just the CSS. `text` is **Smoke** (monochrome) — brand reserves the four chromatic hues for the named spectrum kinds. The UI accent is also **monochrome** (neutral), because `#044EFF` blue is reserved for the user block kind ("blue is the user, never a button"). Multiblock fold **group** tiles and the summary tile are **monochrome recessed**: `--group #2C2C2C`, `--group-edge #4A4A4A`, `--group-accent #9A9A9A`, `--k-summary #2A2A2A` (the old amber/cocoa group palette is gone). Dark surfaces re-base on the brand's neutral Ink/Charcoal ramp (`--bg #0A0A0A`, `--panel #1C1C1C`, …), no blue tint. Fonts are **IBM Plex Sans** (`--sans`) / **IBM Plex Mono** (`--mono`), loaded via `@fontsource` in `routes/+layout.svelte` (was Inter / JetBrains Mono).
-- **live = solid / folded = recessed** (dim + faint hatch, never a heavy dark hatch).
-- In the **Map Grid**: every block is the **same-size square**, laid out in strict
-  conversation order (uniform size ⇒ no reflow holes ⇒ linearity is free). Token
-  **weight is read as a dice face 1–6** (more pips = heavier block). Current
-  thresholds in `ContextMap.svelte → faceFor()` (upper bounds, "up to"): ≤100→1, ≤500→2,
-  ≤1.5k→3, ≤5k→4, ≤15k→5, >15k→6. Arrow keys traverse blocks (←/→ = prev/next, ↑/↓ = ± one row).
-  The grid is split into **two rounded boxes stacked like paragraphs**, divided at
-  `store.protectedFromIndex`: the top box holds older/foldable blocks (thin border);
-  the bottom box holds the protected tail and has a **meaningfully thicker, accented
-  border** to signal protection (`.box.prot`). No text labels — the border does the
-  talking. Each box holds its own uniform grid; order is continuous across both.
+---
+
+## Conductors
+
+`conduct(view: ConductorView): Command[] | null` — the whole contract. `Command[]` = complete desired state (host resets to raw baseline and re-applies the batch); `[]` = clear to raw; `null` = hold last state. Accordion imposes no strategy of its own — no conductor attached = raw context. All conductors are first-party (this repo or a fork; no sandbox, no trust boundary). Folds from every conductor are attributed uniformly (`by:"auto"`).
+
+**Contract:** `conductors/contract/conductor.ts` (in-process shapes: `ConductorView`, `Command` union, `Conductor`, `ConductorHost`) + `conductors/contract/protocol.ts` (WS wire shapes, which import the same types — one definition). Imported via `$conductors` alias.
+
+**To add an in-process conductor:** drop a TS class in `conductors/<name>/`, register one line in `IN_PROCESS_CONDUCTORS` in `conductors/index.ts` — it appears in the header switcher. The host enforces one unconditional floor: **provider-validity** (the message stays sendable). The built-in (`conductors/builtin/builtin.ts`) is the minimal worked example; its output is pinned by a **golden test** (`conductor.builtin.test.ts`) — don't break it.
+
+**Involvement locks ([ADR 0011](docs/adr/0011-conductor-involvement-locks.md)).** A conductor may lock up to three steering controls: `human-steering` (hand fold/unfold/pin/group/reset), `agent-unfold`, and `tail-size`. A conductor that locks none is *collaborative* (the default). An exclusive conductor requires a one-time consent gate. The human's recourse is always **detach** — freezes the current view in place and unlocks all controls (not reset-to-raw; individual folds remain human-reversible). **Four things are never lockable:** observation (map, log, budget readout), the budget dial, the agent's `recall` tool, and detach itself.
+
+**Full references:** [conductors/README.md](conductors/README.md) — how to write one, worked examples, the full conductor catalog · [docs/conductor-protocol.md](docs/conductor-protocol.md) — ConductorView / ViewBlock / Command tables, WebSocket escape hatch, host capabilities.
+
+## Visual grammar
+
+Colors are brand **Spectrum** identity colors — defined in [brand/accordion-brand-kit/brand.md](brand/accordion-brand-kit/brand.md); CSS vars `--k-*` are in `app/src/app.css`. **Changing them means updating the brand, not just CSS.**
+
+| kind | hex |
+|------|-----|
+| `user` | `#044EFF` |
+| `text` (Smoke) | `#9A9A9A` |
+| `thinking` | `#B480DF` |
+| `tool_call` | `#21D4C1` |
+| `tool_result` | `#E19C7D` |
+
+**`#044EFF` blue is reserved for the user block kind — never a button, never UI chrome.** UI accent is always monochrome/neutral.
+
+- **live = solid / folded = recessed** (dim + faint hatch, never a heavy dark hatch)
+- Group and summary tiles are **monochrome recessed**: `--group #2C2C2C · --group-edge #4A4A4A · --group-accent #9A9A9A`
+- Dark surfaces: `--bg #0A0A0A`, `--panel #1C1C1C` — no blue tint (blue is reserved for `user` blocks)
+- Fonts: **IBM Plex Sans** (`--sans`) / **IBM Plex Mono** (`--mono`) via `@fontsource` in `routes/+layout.svelte`
+- **Map grid:** every block is the same-size square in conversation order. Token weight = dice face 1–6. Thresholds in `ContextMap.svelte → faceFor()`: ≤100→1 · ≤500→2 · ≤1.5k→3 · ≤5k→4 · ≤15k→5 · >15k→6
+- **Two-box layout:** grid splits at `store.protectedFromIndex` — foldable region above (thin border), protected tail below (thick accented border, `.box.prot`)
 
 ## Conventions
 
-- **Svelte 5 runes** (`$state`, `$derived`, `$derived.by`, `$effect`, `$props`).
-  `ssr = false`, adapter-static SPA fallback (so `/map` direct-loads). Vite port 1420.
-- **Plain JS/TS** — no fancy build steps beyond SvelteKit.
-- `{@const}` must be an immediate child of `{#if}`/`{#each}` — otherwise use a `$derived`.
-- This Svelte's `svelte-ignore` only honors the **first** code in a multi-code comment.
-- **Performance: do not paint many live gradients/filters across the 982-tile grid.**
-  Radial gradients and per-element `filter` re-rasterize on every repaint and tank
-  interaction. The dice pips are **one cached SVG data-URI per face** (decoded once,
-  blitted) — keep that pattern for anything tile-dense.
-- **Scroll perf on the tile grid:** the win came from killing hover repaints during
-  scroll, not from culling. `ContextMap` sets `class:scrolling` on the stage while a
-  scroll is in flight and clears it ~140 ms after it stops; `.stage.scrolling .grid`
-  drops `pointer-events: none` so the cursor can't trigger per-tile hover repaints
-  mid-scroll. The `.boxes` get GPU layer promotion (`transform: translateZ(0)`) and
-  hover is instant (no `transition`). `content-visibility`/`contain-intrinsic-size`
-  were **removed** from `.cell` (they hurt more than helped here). Keep tile
-  decorations **inset** (the selection ring is inset-only) — outset box-shadows clip.
+- **Svelte 5 runes:** `$state`, `$derived`, `$derived.by`, `$effect`, `$props`. `ssr = false`, adapter-static SPA. Vite port 1420
+- **`{@const}` must be an immediate child of `{#if}` / `{#each}`** — otherwise use `$derived`
+- **`svelte-ignore`** honors only the **first** code in a multi-code comment
+- **No live gradients or `filter` on the 982-tile grid** — they re-rasterize on every repaint and tank interaction. Dice pips are one cached SVG data-URI per face; keep that pattern for anything tile-dense
+- **Scroll perf:** `ContextMap` sets `class:scrolling` during scroll and clears it ~140 ms after stop, dropping `pointer-events: none` on the grid to kill hover repaints (that was the bottleneck, not culling). `.boxes` get `transform: translateZ(0)` for GPU layer promotion. Tile decorations must be **inset** — the selection ring is inset-only; outset shadows clip
 
 ## Running & verifying
 
 ```bash
 cd app
-npm run dev          # browser dev server → http://localhost:1420 (UI iteration only)
-npm run tauri dev    # native desktop window — REQUIRED for live session discovery
-npm run check        # svelte-check / typecheck — keep it 0 errors / 0 warnings
-npm run test         # vitest — unit tests for the risky live/mapping logic
+npm run dev          # browser dev → http://localhost:1420 (UI only — no live discovery)
+npm run tauri dev    # native desktop — REQUIRED for live session discovery
+npm run check        # svelte-check — keep 0 errors / 0 warnings
+npm run test         # vitest
 ```
 
 ```bash
-cd extension && node smoke.mjs   # drives the extension via jiti + a real WS client
-cd app/src-tauri && cargo check  # the native discovery layer (PowerShell — see below)
+cd extension && node smoke.mjs     # extension smoke test
+cd app/src-tauri && cargo check    # Rust layer — run from PowerShell (see below)
 ```
 
-Live **multi-session** discovery (the Sessions list) only works in the **desktop** app — a
-plain browser can't read `~/.accordion/`. Two browser paths exist: (1) **browser-served** —
-a running pi extension serves the app on its WS port and the page **auto-connects to that one
-session** (open the URL from `/accordion`; single-session, no manual entry); (2) **browser
-dev** (`npm run dev` on :1420) — no extension serving, so it falls back to the manual-port
-Connect box. See the **Browser-served mode** bullet under "The live link" above.
-
-Environment gotchas (Windows, this repo's usual setup):
-
-- **cargo is not on the Bash tool's PATH.** Run `npm run tauri dev` from PowerShell
-  with `$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:USERPROFILE\.rustup\bin;$env:PATH"`.
-- The dev server and `tauri dev` both want **port 1420** — only one at a time. Free it
-  with `Get-NetTCPConnection -LocalPort 1420 | Stop-Process` before swapping.
-- The preview/screenshot MCP has been **flaky** here (captures time out even when the
-  page is healthy); verify via `preview_eval` / `preview_inspect` and `svelte-check`.
-- Always `npx svelte-check --tsconfig ./tsconfig.json` before declaring done.
+**Windows gotchas:**
+- **cargo is NOT on the Bash tool's PATH** — use PowerShell: `$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:USERPROFILE\.rustup\bin;$env:PATH"`
+- **Port 1420** is shared by `npm run dev` and `tauri dev` — only one at a time. Free it: `Get-NetTCPConnection -LocalPort 1420 | Stop-Process`
+- **preview/screenshot MCP is flaky** — prefer `preview_eval` / `preview_inspect` for UI verification
+- Always `npx svelte-check --tsconfig ./tsconfig.json` before declaring done
 
 ## Post-merge routine
 
-After a PR lands on `main`, close any open Accordion window (the running `app.exe` locks the file), then pull main on the registered checkout (the one in `~/.pi/agent/settings.json → extensions`), run `npm install` inside `app/` in case deps changed, and rebuild the binary with `npm run tauri build -- --no-bundle` (cargo must be on PATH). The next `/accordion` call picks up the new binary automatically. If the extension code changed, restart pi so it reloads `accordion.ts`.
+After a PR lands on `main`: close any open Accordion window (the running binary locks the file), pull `main` on the registered checkout (`~/.pi/agent/settings.json → extensions`), run `npm install` inside `app/` if deps changed, rebuild with `npm run tauri build -- --no-bundle` (cargo must be on PATH). The next `/accordion` call picks up the new binary. If the extension changed, restart pi.
 
 ## Data & security
 
-- Dev sample: `app/static/sample-session.jsonl` — a real ~130k-token / ~982-block pi
-  session. Most blocks are small (<500 tok); the largest is ~5k, so under the current
-  faceFor() bounds the sample spans roughly faces 1–4 (face 6 = >15k won't appear).
-- **This repo is public.** The sample once contained a live API key (redacted to
-  `REDACTED_API_KEY`). **Never commit real keys** — scan sample data before pushing.
+- Dev sample: `app/static/sample-session.jsonl` — a real ~130k-token / ~982-block pi session
+- **This repo is public. Never commit real keys** — scan sample data before pushing (a live API key was once committed; it's now `REDACTED_API_KEY`)
 
 ## Working style
 
-Be candid — no undue praise, no overselling. The owner reviews by screenshot and
-makes the design calls; surface tradeoffs plainly and let them decide.
+The owner reviews UI work by screenshot and makes the design calls. Surface tradeoffs plainly and let them decide.
