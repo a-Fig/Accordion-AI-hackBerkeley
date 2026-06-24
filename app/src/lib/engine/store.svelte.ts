@@ -14,6 +14,7 @@
 import type { Block, Actor, SessionMeta, ParsedSession, Group } from "./types";
 import { digest, digestTokens, foldTag, groupDigest, groupDigestTokens, substTokens, wireFoldable } from "./digest";
 import { estTokens, BLOCK_OVERHEAD } from "./tokens";
+import { isDurableId } from "../live/mapping";
 import type { Conductor, ConductorView, Command, ClampReport, ClampReason, LockName, ConductorHost, CompletionRequest, CompletionResult, JSONValue } from "$conductors/contract";
 import { hasLock } from "$conductors/contract";
 import { BuiltinConductor } from "$conductors";
@@ -28,6 +29,13 @@ interface GroupShape {
 	stragglers: Set<string>;
 	/** First collapsed member (by order): the one block that "carries" the summary's token cost. */
 	carrier: string | null;
+	/**
+	 * The collapsed members split into maximal contiguous RUNS (in member/conversation order),
+	 * each run uninterrupted by a straggler. The wire inserts ONE summary message per run, so the
+	 * VIEW must charge one summary cost per run too (ADR 0006 §5 — see `groupWire`/`groupLiveTokens`).
+	 * The first block of each run "carries" that run's summary cost; the rest carry 0.
+	 */
+	collapsedRuns: Block[][];
 }
 
 // The fold-ranking (which kinds fold first) moved to `conductors/builtin/builtin.ts` — it is the
@@ -199,6 +207,19 @@ export class AccordionStore {
 	 * before depending on it; the host rejects if it is called while null.
 	 */
 	completer: ((req: CompletionRequest) => Promise<CompletionResult>) | null = null;
+
+	/**
+	 * True iff a live pi WIRE is attached (the live client sets this to true on connect and
+	 * false on disconnect, alongside `completer`). This is the precise "a wire is involved"
+	 * signal for the view-mirrors-wire invariant (issue #13): only in a live session does
+	 * `classifyGroup` enforce durability-aware accounting (non-durable-id members stay live,
+	 * splitting the collapsed run — exactly what the wire's `applyPlan` does). Demo / loaded
+	 * sessions, and conductor STRATEGY tests that inject only a fake `completer`, leave this
+	 * false → durability-AGNOSTIC collapse (the GUI shows the logical grouping, which the issue
+	 * explicitly permits whenever "no wire is involved"). NOT implied by `completer`: a strategy
+	 * test may set `completer` to drive a conductor without any wire being live.
+	 */
+	wireAttached = false;
 
 	/**
 	 * Optional prose-compression backend injected by the app layer. Set from outside (the
@@ -676,16 +697,14 @@ export class AccordionStore {
 		for (const g of this.groups) {
 			if (!g.folded) continue;
 			const c = this.classifyGroup(g);
-			// Carrier token cost mirrors groupLiveTokens: drop → 0, custom digest → its tokens,
-			// default recap → groupDigestTokens. Non-carrier collapsed members always 0.
-			let summaryTok = 0;
-			if (c.carrier) {
-				if (this.isDropGroup(g)) summaryTok = 0; // drop group
-				else if (typeof g.digest === "string") summaryTok = estTokens(g.digest) + BLOCK_OVERHEAD; // custom literal
-				else summaryTok = groupDigestTokens(g, c.collapsedMembers); // default recap
-			}
+			// The wire inserts ONE summary message PER contiguous collapsed run (applyPlan Phase B).
+			// So the VIEW charges one summary cost to the FIRST block of EACH run; every other
+			// collapsed member holds 0. The per-run summaries are byte-identical, so each costs the
+			// same `summaryTok` (drop → 0, custom literal → its tokens, default recap → digest).
+			const summaryTok = this.groupSummaryTok(g, c);
+			const runFirsts = new Set(c.collapsedRuns.map((r) => r[0].id));
 			for (const b of c.members) {
-				if (c.collapsed.has(b.id)) m.set(b.id, { tokens: b.id === c.carrier ? summaryTok : 0, collapsed: true });
+				if (c.collapsed.has(b.id)) m.set(b.id, { tokens: runFirsts.has(b.id) ? summaryTok : 0, collapsed: true });
 				else m.set(b.id, { tokens: b.tokens, collapsed: false }); // straggler: live, full
 			}
 		}
@@ -693,11 +712,42 @@ export class AccordionStore {
 	});
 
 	/**
+	 * The token cost of ONE of a folded group's summary messages — drop group → 0, custom literal
+	 * digest → its own token cost, default recap → `groupDigestTokens` over ALL collapsed members.
+	 * The wire emits one such summary per contiguous run, all byte-identical, so each run costs this.
+	 * Returns 0 when nothing collapses (no carrier). Shared by `groupWire` + `groupLiveTokens`.
+	 */
+	private groupSummaryTok(g: Group, c: GroupShape): number {
+		if (!c.carrier) return 0;
+		if (this.isDropGroup(g)) return 0; // drop group: no wire message inserted
+		if (typeof g.digest === "string" && g.digest) return estTokens(g.digest) + BLOCK_OVERHEAD; // custom literal
+		return groupDigestTokens(g, c.collapsedMembers); // default recap
+	}
+
+	/**
 	 * Split a group's members into what collapses (whole, tool-pair-balanced messages →
 	 * the one summary) vs. what stays live (a tool-pair half whose partner sits outside the
-	 * group — the owner's "leave straggler live" rule). Pure; no durability gate here (that
-	 * is the WIRE's concern in `plan.ts` — the GUI shows the logical collapse so the demo /
-	 * loaded sessions render real savings).
+	 * group — the owner's "leave straggler live" rule). Pure.
+	 *
+	 * The removable set is the SAME MESSAGE-LEVEL FIXPOINT the wire runs in `applyPlan`'s
+	 * Phase A (`mapping.ts`): start with every member message removable, then repeatedly demote
+	 * any removable message that holds a tool_call whose callId is not among the removable set's
+	 * results, OR a tool_result whose callId is not among the removable set's calls — until
+	 * stable. A single pass is NOT enough: demoting one message can orphan a tool-pair partner in
+	 * another still-removable message, which must then be demoted too (e.g. parallel tool calls
+	 * where one result is outside the group — the assistant message can't be removed, so neither
+	 * can the call whose result IS inside, cascading until nothing collapses). Mirroring the wire
+	 * here keeps the VIEW's token accounting byte-faithful to what the agent actually receives.
+	 *
+	 * DURABILITY (ADR: the GUI must mirror exactly what the agent receives, issue #13): the wire
+	 * (`computeGroupOps` → `applyPlan`) strips non-durable ids, so a message containing a
+	 * POSITIONAL (non-durable) id is NEVER removed on the wire — it stays live and splits the
+	 * collapsed run around it. In a LIVE session (`wireAttached` — a real pi wire is attached, so a
+	 * model actually receives what `applyPlan` produces) the view mirrors that exactly: such a
+	 * message is a straggler here too. In a DEMO / loaded session there is no wire (no model
+	 * receives anything), so the view stays durability-AGNOSTIC — it shows the logical collapse so
+	 * demo/loaded sessions render real savings. This is the group-analog of the already-accepted
+	 * "non-durable folds preview in demo" behavior; only live sessions enforce the mirror invariant.
 	 */
 	private classifyGroup(g: Group): GroupShape {
 		const members: Block[] = [];
@@ -705,22 +755,8 @@ export class AccordionStore {
 			const b = this.get(id);
 			if (b) members.push(b);
 		}
-		// Pairing WITHIN the member set: a tool_call is balanced iff its result is also a
-		// member; a tool_result iff its call is. A block whose partner is outside is a straggler.
-		const memberCalls = new Set<string>();
-		const memberResults = new Set<string>();
-		for (const b of members) {
-			if (!b.callId) continue;
-			if (b.kind === "tool_call") memberCalls.add(b.callId);
-			else if (b.kind === "tool_result") memberResults.add(b.callId);
-		}
-		const balanced = (b: Block): boolean => {
-			if (b.kind === "tool_call") return !b.callId || memberResults.has(b.callId);
-			if (b.kind === "tool_result") return !b.callId || memberCalls.has(b.callId);
-			return true;
-		};
-		// Removal is per MESSAGE: a message collapses only if ALL its member blocks are
-		// balanced (so a message holding an unbalanced tool_call stays whole/live).
+		// Group member blocks by their message key — removal is per MESSAGE (a group never splits
+		// an assistant message's parts), so the fixpoint reasons about whole messages.
 		const byMsg = new Map<string, Block[]>();
 		for (const b of members) {
 			const k = messageKey(b.id);
@@ -728,18 +764,76 @@ export class AccordionStore {
 			if (arr) arr.push(b);
 			else byMsg.set(k, [b]);
 		}
-		const removable = new Set<string>(); // message keys that collapse
-		for (const [k, msgBlocks] of byMsg) if (msgBlocks.every(balanced)) removable.add(k);
+		// Map preserves insertion order → these are the message keys in member/conversation order.
+		const msgOrder = [...byMsg.keys()];
+		// Per-message tool-pair callIds (mirror of mapping.ts `messageInfo`): a message's `calls`
+		// are its tool_call callIds, its `results` the tool_result callIds it emits.
+		const msgCalls = new Map<string, string[]>();
+		const msgResults = new Map<string, string[]>();
+		for (const k of msgOrder) {
+			const calls: string[] = [];
+			const results: string[] = [];
+			for (const b of byMsg.get(k)!) {
+				if (!b.callId) continue;
+				if (b.kind === "tool_call") calls.push(b.callId);
+				else if (b.kind === "tool_result") results.push(b.callId);
+			}
+			msgCalls.set(k, calls);
+			msgResults.set(k, results);
+		}
+		// Initial removable set: every member message EXCEPT those the wire would never remove.
+		// In a LIVE session a message holding a POSITIONAL (non-durable) id stays live on the wire
+		// (computeGroupOps/applyPlan strip non-durable ids → the message isn't group-removable), so
+		// it starts as a straggler here too — the view mirrors the wire (issue #13). In demo/loaded
+		// sessions there is no wire, so the view stays durability-agnostic and collapses through it.
+		const live = this.wireAttached;
+		const removable = new Set<string>();
+		for (const k of msgOrder) {
+			const msgBlocks = byMsg.get(k)!;
+			if (live && msgBlocks.some((b) => !isDurableId(b.id))) continue; // #13: non-durable → straggler on the wire
+			removable.add(k);
+		}
+		// Fixpoint cascade (mirror of applyPlan Phase A): keep a removal only if its tool pairs are
+		// fully inside the removal set. Repeat to a fixpoint (demoting one message can orphan a
+		// partner in another, which must then be demoted too).
+		let changed = true;
+		do {
+			changed = false;
+			const calls = new Set<string>();
+			const results = new Set<string>();
+			for (const k of msgOrder) {
+				if (!removable.has(k)) continue;
+				for (const c of msgCalls.get(k)!) calls.add(c);
+				for (const c of msgResults.get(k)!) results.add(c);
+			}
+			for (const k of msgOrder) {
+				if (!removable.has(k)) continue;
+				const unbalanced = msgCalls.get(k)!.some((c) => !results.has(c)) || msgResults.get(k)!.some((c) => !calls.has(c));
+				if (unbalanced) {
+					removable.delete(k); // straggler: a tool-pair half is outside → keep this message live
+					changed = true;
+				}
+			}
+		} while (changed);
 		const collapsed = new Set<string>();
 		const stragglers = new Set<string>();
 		const collapsedMembers: Block[] = [];
+		// Maximal contiguous runs of collapsed members (in member order), split by any straggler —
+		// the same run boundaries the wire's Phase B uses to insert one summary per run.
+		const collapsedRuns: Block[][] = [];
+		let run: Block[] | null = null;
 		for (const b of members) {
 			if (removable.has(messageKey(b.id))) {
 				collapsed.add(b.id);
 				collapsedMembers.push(b);
-			} else stragglers.add(b.id);
+				if (run) run.push(b);
+				else collapsedRuns.push((run = [b]));
+			} else {
+				stragglers.add(b.id);
+				run = null; // a straggler breaks the run
+			}
 		}
-		return { members, collapsedMembers, collapsed, stragglers, carrier: collapsedMembers[0]?.id ?? null };
+		return { members, collapsedMembers, collapsed, stragglers, carrier: collapsedMembers[0]?.id ?? null, collapsedRuns };
 	}
 
 	/**
@@ -1429,7 +1523,7 @@ export class AccordionStore {
 		for (const b of this.groupMembers(g)) n += b.tokens;
 		return n;
 	}
-	/** What the group costs live: folded → one summary (+ any straggler full); open → members' own eff. */
+	/** What the group costs live: folded → one summary PER run (+ any straggler full); open → members' own eff. */
 	groupLiveTokens(g: Group): number {
 		if (!g.folded) {
 			let n = 0;
@@ -1437,20 +1531,11 @@ export class AccordionStore {
 			return n;
 		}
 		const c = this.classifyGroup(g);
-		// Drop group: the carrier contributes 0 (no wire message inserted).
-		// Custom-digest group: the carrier contributes the literal summary's token cost.
-		// Default recap group: carrier contributes the group digest tokens (unchanged).
-		let carrierTokens = 0;
-		if (c.carrier) {
-			if (this.isDropGroup(g)) {
-				carrierTokens = 0;
-			} else if (typeof g.digest === "string" && g.digest) {
-				carrierTokens = estTokens(g.digest) + BLOCK_OVERHEAD;
-			} else {
-				carrierTokens = groupDigestTokens(g, c.collapsedMembers);
-			}
-		}
-		let n = carrierTokens;
+		// The wire inserts ONE summary message per contiguous collapsed RUN (a straggler in the
+		// middle of the group splits the collapsed members into multiple runs). So the live cost is
+		// (run count × one summary) + every straggler's full tokens. For a drop group summaryTok is
+		// 0, so the run count is irrelevant (stays 0). One run (or none) reduces to the old behavior.
+		let n = c.collapsedRuns.length * this.groupSummaryTok(g, c);
 		for (const id of c.stragglers) n += this.get(id)?.tokens ?? 0;
 		return n;
 	}

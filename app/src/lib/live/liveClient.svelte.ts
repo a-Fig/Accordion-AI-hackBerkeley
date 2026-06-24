@@ -245,6 +245,7 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 			// Cleared on disconnect/close so `host.can("complete")` returns false when
 			// there is no active model link.
 			session.store.completer = sendCompletion;
+			session.store.wireAttached = true; // live wire up → view mirrors the wire (issue #13)
 			if (typeof msg.meta.contextWindow === "number" && msg.meta.contextWindow > 0) {
 				session.store.setContextWindow(msg.meta.contextWindow);
 				session.store.setBudget(msg.meta.contextWindow);
@@ -272,6 +273,7 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 				// Re-attach the completer: a structural reset builds a brand-new store object,
 				// so the reference from the hello path is gone. The socket is still live.
 				session.store.completer = sendCompletion;
+				session.store.wireAttached = true; // socket still live after structural reset (issue #13)
 			}
 			// Update contextWindow from the sync (refreshed each context hook, and pushed
 			// immediately on a `/model` swap). Snap the budget to the window the FIRST time
@@ -413,6 +415,7 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 			// disconnected. Drain any pending completion promises with a disconnection error
 			// so they do not hang indefinitely.
 			if (session.store) session.store.completer = null;
+			if (session.store) session.store.wireAttached = false; // wire down → durability-agnostic view (issue #13)
 			drainPendingCompletions("disconnected");
 			if (!manualClose && live.status !== "error") {
 				live.status = "idle";
@@ -434,6 +437,7 @@ export function disconnectLive(): void {
 	// fire asynchronously; running it here ensures the completer is unavailable the
 	// moment the caller's disconnectLive() returns.
 	if (session.store) session.store.completer = null;
+	if (session.store) session.store.wireAttached = false; // closing → no wire (issue #13)
 	drainPendingCompletions("disconnected");
 	if (socket) {
 		try {
