@@ -18,21 +18,26 @@
 
 Accordion is a [pi](https://github.com/earendil-works/pi) extension that shows you
 your agent's entire context window at a glance — as a grid of colored blocks — and
-lets you **fold**, **unfold**, and **pin** any part of it, by hand or automatically.
+lets you manage it manually or with intelligence.
 
-Nothing is ever deleted. Folding only changes what the agent is *shown*, never what's
-*stored* — so every fold is instantly reversible, with no database or search index
-behind it.
 <div align="center">
 
 <a href="docs/assets/accordion-demo.mp4"><img src="docs/assets/map-hero.png" alt="Accordion's context Map — a live pi session rendered as a grid of colored blocks" width="860"></a>
 
-<sub>Your whole context window, one square per block — live above, protected working tail below. &nbsp;·&nbsp; ▶ <a href="docs/assets/accordion-demo.mp4">Watch the demo</a></sub>
+<sub>Your whole context window, one square per block — live above, protected working tail below</sub>
+
 </div>
 
 > 📖 **[VISION.md](VISION.md)** is the full product north star. This page is the short version.
 
 ## Why it's different
+
+### No blocking calls for compaction 
+your context window is automatically managed for you in the background, with cashe optimizations in mind.
+
+### longer more useful sessions
+
+### Cheaper inference costs
 
 Every long-running agent hits the same wall: the context fills up, and something has to
 go. Today's answers are both bad:
