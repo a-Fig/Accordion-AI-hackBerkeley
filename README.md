@@ -11,7 +11,7 @@
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-lockup-white.png">
   <img alt="Accordion" src="docs/assets/logo-lockup-black.png" width="440">
 </picture>
-
+#1
 <a href="docs/assets/accordion-demo.mp4"><img src="docs/assets/map-hero.png" alt="Accordion's context Map — a live pi session rendered as a grid of colored blocks" width="860"></a>
 
 <sub>Your whole context window, one square per block — live above, protected working tail below. &nbsp;·&nbsp; ▶ <a href="docs/assets/accordion-demo.mp4">Watch the demo</a></sub>
