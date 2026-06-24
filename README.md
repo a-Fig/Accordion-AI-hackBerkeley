@@ -1,13 +1,17 @@
 <div align="center">
 
-# 🪗 Accordion
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-lockup-white.png">
+  <img alt="Accordion" src="docs/assets/logo-lockup-black.png" width="440">
+</picture>
 
 ### Compaction is naive — and developers hate it.
 
 **See everything your AI agent holds in context — and fold it like an accordion instead.**
 
-<!-- TODO: replace with a real hero GIF of the Map view (fold a block, watch it collapse) -->
-<p><em>hero GIF goes here</em></p>
+<a href="docs/assets/accordion-demo.mp4"><img src="docs/assets/map-hero.png" alt="Accordion's context Map — a live pi session rendered as a grid of colored blocks" width="860"></a>
+
+<sub>Your whole context window, one square per block — live above, protected working tail below. &nbsp;·&nbsp; ▶ <a href="docs/assets/accordion-demo.mp4">Watch the demo</a></sub>
 
 </div>
 
@@ -64,9 +68,19 @@ second — click it (or run `/accordion` in that terminal) and watch its context
 live. Folding is **off by default**; flip the header toggle to arm it and start steering
 what the agent is shown.
 
+<div align="center">
+<img src="docs/assets/sessions-sidebar.png" alt="Sessions sidebar — every running pi session auto-appears, with live token counts" width="260">
+<br><sub>Every running pi session auto-appears in the sidebar, with a live token count.</sub>
+</div>
+
 ## How it works
 
-Three hands share the same controls:
+The **context Map** is the whole window at a glance: one square per block, sized by token
+weight (a dice face, 1–6), colored by kind — **user** messages, **assistant** responses,
+**thinking**, **tool calls**, and **tool results** each get their own hue. Bright = live;
+recessed and hatched = folded.
+
+Three hands share those controls:
 
 - **You** — fold, unfold, pin, and peek by hand. Your overrides always win.
 - **The agent** — reaches back to unfold or pin context it needs mid-task, or **recall**
@@ -78,12 +92,42 @@ Three hands share the same controls:
   kill switch.
 
 Every block is **Full**, **Folded** (shown as a short tagged summary), or **Pinned**
-(locked open). Folds nest: cold turns fold into groups, groups into bigger groups, so a
-session of thousands of turns stays small enough to fit and complete enough to recover.
-And the recent past is always safe — the most recent ~20k tokens are a protected working
-tail the agent reasons over at full fidelity.
+(locked open).
+
+<div align="center">
+<img src="docs/assets/fold-region.png" alt="A region of folded blocks — dimmed and hatched, still on the wire as compact digests" width="820">
+<br><sub>Folded blocks recede — dimmed and hatched — but stay on the wire as a <code>{#code FOLDED}</code> digest the agent can <code>unfold</code> or <code>recall</code> at any time.</sub>
+</div>
+
+Folds nest: cold turns fold into groups, groups into bigger groups, so a session of
+thousands of turns stays small enough to fit and complete enough to recover. And the
+recent past is always safe — the most recent ~20k tokens are a protected working tail the
+agent reasons over at full fidelity (the thick-bordered box below the fold line).
 
 → Capability matrix, full walkthrough, and the deep spec: **[VISION.md](VISION.md)**
+
+## The proof — early, but pointed
+
+Accordion ships with a catalog of pluggable **Conductors**. The strongest so far,
+**[Thermocline](conductors/thermocline/)**, scores each block's "temperature" with a small
+(0.5B-parameter) attention probe and compacts coldest-first under a hard token budget —
+attention decides order, the budget decides depth.
+
+In an early run on **SlopCodeBench** (a long-horizon coding benchmark), Thermocline at a
+100k-token budget cleared far more of the task than naive compaction at the same budget:
+
+| Conductor | Budget | Score | Checkpoints reached |
+|---|:---:|:---:|:---:|
+| **Thermocline** | 100k | **83.3%** | 5 / 6 |
+| naive compaction | 100k | 33.3% | 2 / 4 |
+
+<div align="center">
+<img src="docs/assets/attention-conductor.png" alt="Attention conductor view — each block tinted by how much the working tail still attends back to it" width="600">
+<br><sub>The attention view: each block tinted by how much the working tail still attends back to it. Cold blocks fold first.</sub>
+</div>
+
+> ⚠️ **Read this as a signal, not a guarantee.** It's a single hackathon-scale run on one
+> problem set — not a published benchmark. Broader, repeatable evaluation is on the roadmap.
 
 ## What works today
 
@@ -135,4 +179,12 @@ place where outside help is most valuable right now.
 **The north star: your agent's memory should be something you can see and steer — not a
 black box that silently forgets.**
 
+<div align="center">
+
+🏆 &nbsp;Built at the **AI Hackathon 2026 @ UC Berkeley** — a winning project.
+
+<sub>Tyler Darisme &nbsp;·&nbsp; Aaditya Desai &nbsp;·&nbsp; Sheel Shah &nbsp;·&nbsp; Thy Tang</sub>
+
 🪗
+
+</div>
