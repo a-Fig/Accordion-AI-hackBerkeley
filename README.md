@@ -1,49 +1,42 @@
 <div align="center">
 
-# 🪗 Accordion
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-lockup-white.png">
+  <img alt="Accordion" src="docs/assets/logo-lockup-black.png" width="440">
+</picture>
 
-### Intelligent context management build for developers. 
+### Compaction is naive — and developers hate it.
 
-**See everything your AI agent is holding in context — and fold, unfold, and pin any part of it, by hand or automatically.**
+**See everything your AI agent holds in context — and fold it like an accordion instead.**
+
+<a href="docs/assets/accordion-demo.mp4"><img src="docs/assets/map-hero.png" alt="Accordion's context Map — a live pi session rendered as a grid of colored blocks" width="860"></a>
+
+<sub>Your whole context window, one square per block — live above, protected working tail below. &nbsp;·&nbsp; ▶ <a href="docs/assets/accordion-demo.mp4">Watch the demo</a></sub>
 
 </div>
 
 ---
 
-> 📖 **The full product spec is in [VISION.md](VISION.md). This page is the short version.**
+Accordion is a [pi](https://github.com/earendil-works/pi) extension that shows you
+your agent's entire context window at a glance — as a grid of colored blocks — and
+lets you **fold**, **unfold**, and **pin** any part of it, by hand or automatically.
 
-## The problem
+Nothing is ever deleted. Folding only changes what the agent is *shown*, never what's
+*stored* — so every fold is instantly reversible, with no database or search index
+behind it.
 
-Every long-running agent hits the same wall: the context window fills up, and something has to go. Today's answers are both bad — **compaction** blasts your whole history into one lossy summary (slow, destructive, all-or-nothing), and **sliding windows** just drop the oldest tokens (the agent simply forgets). Both treat context as a buffer to flush: the detail is gone, you never saw it go, and you can't get it back.
-
-## The idea
-
-> Context isn't a buffer. It's an accordion.
-
-Accordion shows the agent's context as a list of **sections** — one per turn — and lets you resize it instead of flushing it. Every section is **Full**, **Folded** (shown as a short summary), or **Pinned** (locked open). Four actions move them:
-
-- **Fold** — replace a section with its summary to free up room.
-- **Unfold** — bring it back to full detail (still auto-managed, unless pinned).
-- **Pin / Unpin** — lock a section open so nothing folds it automatically.
-- **Peek** — read a folded section in the window *without* changing the agent's context.
-
-Nothing is ever deleted — folding only changes what the agent is *shown*, never what's *stored* — so every fold is instantly reversible, with no database or search index behind it.
-
-And the recent past is always safe: the most recent ~20k tokens of context are protected, so the agent's working tail — its latest reasoning — stays at full fidelity. That tail is an absolute no-fold zone under a collaborative conductor (the default); an exclusive conductor you approve can manage it.
-
-## Three hands on the same controls
-
-- **You** — fold, unfold, pin, and peek, by hand.
-- **The agent** — reaches back to unfold or pin context it needs mid-task, or **recall** a folded block as a tool result (like `read_file`) without changing what's standing in context.
-- **The Conductor** — Accordion's automatic mode: between every turn it folds what's gone cold and unfolds what's becoming relevant, on its own.
-
-A Conductor is **collaborative** by default (you steer alongside it — your overrides always win) or **exclusive** (autopilot: you approve it taking over specific controls, and steer via the **detach** kill switch). Either way, observation is always yours — you can always see, and you can always leave.
-
-And folds nest: cold turns fold into **groups**, groups into bigger groups, so a session of thousands of turns stays small enough to fit and complete enough to recover. It all happens in a **separate window** where every change is shown and attributed — open it to watch and steer, close it to let the Conductor run.
-
-→ Full details, capability matrix, and a walkthrough: **[VISION.md](VISION.md)**
+> 📖 **[VISION.md](VISION.md)** is the full product north star. This page is the short version.
 
 ## Why it's different
+
+Every long-running agent hits the same wall: the context fills up, and something has to
+go. Today's answers are both bad:
+
+- **Compaction** blasts your whole history into one lossy summary — slow, destructive,
+  all-or-nothing.
+- **Sliding windows** just drop the oldest tokens — the agent simply forgets.
+
+Both treat context as a buffer to flush. You never saw it go, and you can't get it back.
 
 | | Sliding window | `/compact` | Black-box memory | 🪗 Accordion |
 |---|:---:|:---:|:---:|:---:|
@@ -54,68 +47,144 @@ And folds nest: cold turns fold into **groups**, groups into bigger groups, so a
 | You can see and steer it | ❌ | ❌ | ❌ | ✅ |
 | No extra infra (no vector DB) | ✅ | ✅ | ❌ | ✅ |
 
-## Status
+Context isn't a buffer. It's an accordion.
 
-[VISION.md](VISION.md) is the north star — the finished product we're building toward. What exists **today**:
+## Quick start
 
-- **A desktop app** (`app/`, Tauri + SvelteKit) — the *separate window*. It renders an
-  agent's context window as a foldable map, with a token budget and a protected working
-  tail. It opens saved `.jsonl` sessions (the Open dialog lands in `~/.pi/agent/sessions`
-  or `~/.claude/projects`), and — new — attaches to a **live** pi session.
-- **A live link** (`extension/accordion.ts` + `app/src/lib/live/`). A pi extension
-  streams a running session's context to the app over a local WebSocket; the app
-  **auto-discovers** every running pi (the "pull" model) and shows it in a Sessions
-  sidebar — click to watch its context update live. Live steering is **opt-in**: by
-  default folds are preview-only, and the header toggle arms applying them to the agent.
-- Reversible, provider-safe folding in the app (content substitution for blocks, true
-  range collapse for manually created groups), with deterministic digest summaries and
-  `{#code FOLDED}` handles the live agent can ask to unfold.
-
-Honest about what's **not** there yet: there is no autonomous Conductor on a live session,
-no agent-driven pinning, no nested/hierarchical groups, no LLM-generated summaries, no
-replay — that's the build ahead. (An older terminal-only POC — `src/accordion.ts`,
-`/expand` · `/collapse` · `/accordion` — predated the app and has since been removed.)
-
-### Try it
+Accordion attaches to a **live pi session** and watches its context update in real time.
 
 ```bash
-cd app && npm install && npm run tauri dev    # opens the desktop window
+cd app && npm install && npm run tauri dev
 ```
 
-Register the live extension in `~/.pi/agent/settings.json`:
+Register the extension in `~/.pi/agent/settings.json`:
 
 ```json
-{ "extensions": ["<path-to-repo>/extension/accordion.ts"] }
+{ "extensions": ["<path-to-this-repo>/extension/accordion.ts"] }
 ```
 
-Then run `pi` in any project — it appears in the app's **Sessions** sidebar within a
-second. Click it (or run `/accordion` in that terminal to foreground the app on it) and
-watch its context populate live.
+Now run `pi` in any project. It shows up in Accordion's **Sessions** sidebar within a
+second — click it (or run `/accordion` in that terminal) and watch its context populate
+live. Folding is **off by default**; flip the header toggle to arm it and start steering
+what the agent is shown.
 
-### Developing
+<div align="center">
+<img src="docs/assets/sessions-sidebar.png" alt="Sessions sidebar — every running pi session auto-appears, with live token counts" width="260">
+<br><sub>Every running pi session auto-appears in the sidebar, with a live token count.</sub>
+</div>
 
-Setting up for development (prerequisites, running the app, the quality gate, the live-link
-setup, and platform gotchas) is in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
+## How it works
+
+The **context Map** is the whole window at a glance: one square per block, sized by token
+weight (a dice face, 1–6), colored by kind — **user** messages, **assistant** responses,
+**thinking**, **tool calls**, and **tool results** each get their own hue. Bright = live;
+recessed and hatched = folded.
+
+Three hands share those controls:
+
+- **You** — fold, unfold, pin, and peek by hand. Your overrides always win.
+- **The agent** — reaches back to unfold or pin context it needs mid-task, or **recall**
+  a folded block as a tool result (like `read_file`) without changing what's standing in
+  context.
+- **The Conductor** — an automatic strategy that, between turns, folds what's gone cold
+  and unfolds what's becoming relevant. Collaborative by default; an *exclusive*
+  conductor you approve can take over specific controls, and **detach** is always your
+  kill switch.
+
+Every block is **Full**, **Folded** (shown as a short tagged summary), or **Pinned**
+(locked open).
+
+<div align="center">
+<img src="docs/assets/fold-region.png" alt="A region of folded blocks — dimmed and hatched, still on the wire as compact digests" width="820">
+<br><sub>Folded blocks recede — dimmed and hatched — but stay on the wire as a <code>{#code FOLDED}</code> digest the agent can <code>unfold</code> or <code>recall</code> at any time.</sub>
+</div>
+
+Folds nest: cold turns fold into groups, groups into bigger groups, so a session of
+thousands of turns stays small enough to fit and complete enough to recover. And the
+recent past is always safe — the most recent ~20k tokens are a protected working tail the
+agent reasons over at full fidelity (the thick-bordered box below the fold line).
+
+→ Capability matrix, full walkthrough, and the deep spec: **[VISION.md](VISION.md)**
+
+## The proof — early, but pointed
+
+Accordion ships with a catalog of pluggable **Conductors**. The strongest so far,
+**[Thermocline](conductors/thermocline/)**, scores each block's "temperature" with a small
+(0.5B-parameter) attention probe and compacts coldest-first under a hard token budget —
+attention decides order, the budget decides depth.
+
+In an early run on **SlopCodeBench** (a long-horizon coding benchmark), Thermocline at a
+100k-token budget cleared far more of the task than naive compaction at the same budget:
+
+| Conductor | Budget | Score | Checkpoints reached |
+|---|:---:|:---:|:---:|
+| **Thermocline** | 100k | **83.3%** | 5 / 6 |
+| naive compaction | 100k | 33.3% | 2 / 4 |
+
+<div align="center">
+<img src="docs/assets/attention-conductor.png" alt="Attention conductor view — each block tinted by how much the working tail still attends back to it" width="600">
+<br><sub>The attention view: each block tinted by how much the working tail still attends back to it. Cold blocks fold first.</sub>
+</div>
+
+> ⚠️ **Read this as a signal, not a guarantee.** It's a single hackathon-scale run on one
+> problem set — not a published benchmark. Broader, repeatable evaluation is on the roadmap.
+
+## What works today
+
+- ✅ Desktop app (Tauri + SvelteKit): the Map view, token budget, inspector, protected
+  working tail.
+- ✅ Live link to a running pi session, with auto-discovery.
+- ✅ Opt-in live steering — apply your fold plan to what the agent is shown.
+- ✅ Reversible, provider-safe folding with deterministic `{#code FOLDED}` digests the
+  agent can ask to unfold.
+- ✅ Involvement locks — exclusive conductors, the consent gate, freeze-on-detach, and
+  agent `recall`.
+- ✅ The Conductor — automatic fold/unfold between turns, based on context.
+- ✅ LLM-generated summaries, computed once and cached.
+- ✅ Read-only browsing of saved Claude Code transcripts.
+
+Honest about what's **not** there yet: no agent-driven pinning, no hierarchical (nested)
+groups, no replay. That's the build ahead.
 
 ## Roadmap
 
 - [x] Core fold/unfold engine — reversible, tool-pair safe
-- [x] Rolling automatic folding + manual expansion, protected working tail
 - [x] The separate window — desktop app: Map view, budget, inspector
-- [x] Live link to a running pi session + auto-discovery
-- [x] Opt-in live steering — apply the fold plan to what the agent is shown
-- [x] Agent-driven unfold from `{#code FOLDED}` tags
-- [x] Involvement locks — exclusive conductors, the consent gate, freeze-on-detach kill switch, and agent `recall`
-- [ ] LLM-generated summaries, computed once and cached
-- [ ] The Conductor — automatic fold/unfold between turns, based on context
-- [ ] Hierarchical folding — fold the folds, for million-turn sessions
+- [x] Live link to pi + auto-discovery, opt-in steering
+- [x] Agent-driven unfold + `recall`, involvement locks
+- [x] LLM-generated summaries, computed once and cached
+- [x] The Conductor — automatic fold/unfold between turns
+- [ ] Hierarchical folding for million-turn sessions
 - [ ] Agent-driven pin
-- [ ] Replay — scrub how the context evolved across a session
+- [ ] Replay — scrub how context evolved across a session
+- [ ] Better conductors — research, develop, and test stronger context strategies
+- [ ] Beyond pi — bring Accordion's steering to more agents
+
+## Contributing
+
+An experiment in context engineering — contributions, ideas, and benchmarks welcome.
+Setup, the quality gate, and platform gotchas are in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
+
+Our main frontier right now is **better conductors**: researching which context actually
+matters, developing stronger strategies, and testing them against real sessions. We're not
+chasing a long tail of mediocre ones — the goal is one to three conductors that genuinely
+hold up. A conductor is a single class with one method — `conduct(view) → Command[]` — and
+one registration line to appear in the app. Strategies can range from simple oldest-first
+folding to scoring each block's relevance with a small model. If you have a theory about
+what an agent should keep and what it can let go, that's the surface to prove it — and the
+place where outside help is most valuable right now.
 
 ---
 
-**The north star: your agent's memory should be something you can see and steer — not a black box that silently forgets.**
+**The north star: your agent's memory should be something you can see and steer — not a
+black box that silently forgets.**
+
+<div align="center">
+
+🏆 &nbsp;Built at the **AI Hackathon 2026 @ UC Berkeley** — a winning project.
+
+<sub>Tyler Darisme &nbsp;·&nbsp; Aaditya Desai &nbsp;·&nbsp; Sheel Shah &nbsp;·&nbsp; Thy Tang</sub>
 
 🪗
 
-<sub>An experiment in context engineering. Contributions, ideas, and benchmarks welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).</sub>
+</div>
