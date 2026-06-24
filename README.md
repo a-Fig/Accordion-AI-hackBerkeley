@@ -1,4 +1,5 @@
 
+<div align="center">
 
 ### /compact is the naive solution, Accordion is the intelligent one.
 
@@ -9,7 +10,6 @@
   <img alt="Accordion" src="docs/assets/logo-lockup-black.png" width="440">
 </picture>
 
-<div align="center">
 
 <img src="docs/assets/accordion-hero.gif" alt="Accordion — the context map demo: blocks folding and unfolding while the protected tail stays intact" width="820">
 
