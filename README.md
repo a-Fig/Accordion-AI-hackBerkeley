@@ -35,7 +35,7 @@ your agent's entire context window at a glance and lets you manage it manually o
 > The relevance of each block is ranked so we only fold bloat, and keep whats important. 
 
 #### 3. Cheaper inference costs
-> Accordion keeps your context window lean, with cashe optimizations in mind.
+> Accordion keeps your context window lean, with cache optimizations in mind.
 
 Every long-running agent hits the same wall: the context fills up, and something has to
 go. Today's answers are dumb and dumber:
