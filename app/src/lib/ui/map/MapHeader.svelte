@@ -369,6 +369,8 @@
 		display: flex;
 		align-items: flex-start;
 		gap: var(--sp-4);
+		flex-wrap: wrap;
+		min-width: 0;
 	}
 
 	/* ── Nums cluster — the brand data device ── */
@@ -392,7 +394,7 @@
 		font-weight: 600;
 		color: var(--text);
 		line-height: 1;
-		letter-spacing: -0.01em;
+		letter-spacing: 0;
 		transition: color var(--dur-fast) var(--ease-out);
 	}
 	.hero-stat.over {
@@ -418,8 +420,12 @@
 		margin-left: auto;
 		display: flex;
 		align-items: center;
-		gap: var(--sp-4);
-		flex: 0 0 auto;
+		justify-content: flex-end;
+		gap: var(--sp-3);
+		row-gap: var(--sp-2);
+		flex: 1 1 520px;
+		min-width: 0;
+		flex-wrap: wrap;
 	}
 
 	/* Eyebrow shared by every control field — mono, uppercase, wide tracking, faint. */
@@ -448,6 +454,7 @@
 		flex-direction: column;
 		gap: 5px;
 		cursor: default;
+		min-width: 0;
 	}
 
 	/* Read-only badge — mono eyebrow chip */
@@ -539,7 +546,7 @@
 
 	/* ── Slider knob ── */
 	.knob input[type="range"] {
-		width: 120px;
+		width: clamp(92px, 16vw, 150px);
 		height: 4px;
 		accent-color: var(--accent);
 		margin: 0;
@@ -612,6 +619,9 @@
 		border-radius: var(--radius-pill);
 		padding: 2px 6px;
 	}
+	.reset-btn {
+		white-space: nowrap;
+	}
 
 	/* Protect readout (the dial lives on the bar) */
 	.protect-read {
@@ -683,6 +693,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 5px;
+		min-width: 0;
 	}
 
 	/* Budget headroom: slack between usage and the ceiling */
@@ -849,5 +860,39 @@
 		background: var(--text);
 		border-radius: 50%;
 		box-shadow: 0 0 0 1px var(--panel-2);
+	}
+
+	@media (max-width: 920px) {
+		.hdr {
+			padding: var(--sp-3);
+		}
+		.top {
+			gap: var(--sp-3);
+		}
+		.ctl {
+			margin-left: 0;
+			justify-content: flex-start;
+			flex-basis: 100%;
+		}
+		.hero-line {
+			flex-wrap: wrap;
+			row-gap: 3px;
+		}
+	}
+
+	@media (max-width: 560px) {
+		.ctl {
+			align-items: stretch;
+		}
+		.fold-arm,
+		.reset-btn {
+			justify-content: center;
+		}
+		.knob {
+			flex: 1 1 180px;
+		}
+		.knob input[type="range"] {
+			width: 100%;
+		}
 	}
 </style>

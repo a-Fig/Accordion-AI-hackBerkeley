@@ -69,11 +69,11 @@
 	--sp-7: 48px; --sp-8: 64px; /* NEW (brand) */
 
 	/* ===== Type scale (NEW) ===== */
-	/* --fs-2xs (9px) is a deliberate floor for decorative micro-labels only
+	/* --fs-2xs is a deliberate floor for decorative micro-labels only
 	   (badges, the WEIGHT legend, the vertical token rail) — not body/UI text. */
-	--fs-2xs: 9px;
-	--fs-xs: 11px; --fs-sm: 12px; --fs-base: 13px;
-	--fs-md: 14px; --fs-lg: 16px; --fs-xl: 19px; --fs-2xl: 24px;
+	--fs-2xs: 10px;
+	--fs-xs: 12px; --fs-sm: 13px; --fs-base: 14px;
+	--fs-md: 15px; --fs-lg: 17px; --fs-xl: 20px; --fs-2xl: 26px;
 
 	/* ===== Elevation — consistent, dark-tuned (NEW) ===== */
 	--shadow-1: 0 1px 2px rgba(0,0,0,.4);
@@ -113,7 +113,7 @@ body {
 	background: var(--bg);
 	color: var(--text);
 	font-family: var(--sans);
-	font-size: 14px;
+	font-size: var(--fs-base);
 	line-height: 1.45;
 	-webkit-font-smoothing: antialiased;
 	-moz-osx-font-smoothing: grayscale;
