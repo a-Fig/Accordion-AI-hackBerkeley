@@ -425,11 +425,13 @@
 		align-items: center;
 		gap: var(--sp-3);
 		padding: 0 var(--sp-5);
-		height: 44px;
+		min-height: 44px;
 		border-bottom: 1px solid var(--line-soft);
 		background: var(--panel);
 		box-shadow: var(--shadow-1);
 		flex: 0 0 auto;
+		flex-wrap: wrap;
+		row-gap: var(--sp-2);
 	}
 	/* Smoky spectrum hairline along the bottom edge — brand spectrum kept low-key:
 	   1px tall, 20% opacity, faded at both ends so it's a wash, never a hard rainbow bar. */
@@ -464,7 +466,7 @@
 		font-size: var(--fs-md);
 		font-weight: 700;
 		color: var(--text);
-		letter-spacing: -0.02em;
+		letter-spacing: 0;
 		line-height: 1;
 	}
 
@@ -569,7 +571,8 @@
 		display: flex;
 		align-items: center;
 		gap: var(--sp-1);
-		flex: 0 0 auto;
+		flex: 0 1 auto;
+		min-width: 0;
 	}
 	.meta-chip {
 		font-size: var(--fs-xs);
@@ -589,6 +592,7 @@
 		align-items: center;
 		gap: var(--sp-2);
 		flex: 0 0 auto;
+		flex-wrap: wrap;
 	}
 	.nav-btn {
 		display: inline-flex;
@@ -639,6 +643,40 @@
 		min-width: 0;
 		min-height: 0;
 		overflow: hidden;
+	}
+
+	@media (max-width: 980px) {
+		.topbar {
+			padding: var(--sp-2) var(--sp-3);
+		}
+		.meta-row {
+			order: 5;
+			flex-basis: 100%;
+		}
+		.main.open,
+		.main.activity,
+		.main.open.activity {
+			grid-template-columns: minmax(0, 1fr);
+		}
+	}
+
+	@media (max-width: 620px) {
+		.topbar {
+			align-items: flex-start;
+		}
+		.brand {
+			flex-basis: 100%;
+		}
+		.session-cluster {
+			flex-basis: 100%;
+		}
+		.nav-row {
+			flex-basis: 100%;
+		}
+		.nav-btn {
+			flex: 1 1 140px;
+			justify-content: center;
+		}
 	}
 
 	/* ── Fallback / empty state ───────────────────────────────── */
@@ -698,7 +736,7 @@
 		font-size: var(--fs-xl);
 		font-weight: 700;
 		color: var(--text);
-		letter-spacing: -0.02em;
+		letter-spacing: 0;
 		line-height: 1;
 	}
 
@@ -709,7 +747,7 @@
 		font-size: clamp(var(--fs-2xl), 4vw, 40px);
 		font-weight: 600;
 		color: var(--text);
-		letter-spacing: -0.02em;
+		letter-spacing: 0;
 		line-height: 1.08;
 		margin: 0;
 	}

@@ -1194,6 +1194,8 @@
 		display: flex;
 		align-items: center;
 		gap: var(--sp-3);
+		row-gap: var(--sp-2);
+		flex-wrap: wrap;
 		padding: var(--sp-2) var(--sp-4);
 		background: var(--panel);
 		border-bottom: 1px solid var(--line-soft);
@@ -1206,6 +1208,9 @@
 		position: relative;
 		z-index: 2;
 	}
+	.toolbar > * {
+		min-width: 0;
+	}
 	/* subtle vertical divider between toolbar clusters */
 	.tb-divider {
 		width: 1px;
@@ -1214,7 +1219,8 @@
 		flex: 0 0 auto;
 	}
 	.grow {
-		flex: 1;
+		flex: 1 1 24px;
+		min-width: 24px;
 	}
 	.count {
 		font-size: var(--fs-xs);
@@ -1228,6 +1234,7 @@
 		display: inline-flex;
 		align-items: center;
 		gap: var(--sp-2);
+		flex: 0 1 auto;
 	}
 	.tlbl {
 		font-family: var(--mono);
@@ -1241,7 +1248,10 @@
 		display: inline-flex;
 		align-items: center;
 		gap: var(--sp-2);
+		row-gap: 5px;
 		min-width: 0;
+		flex: 1 1 310px;
+		flex-wrap: wrap;
 	}
 	.kind-pair {
 		display: inline-flex;
@@ -1337,6 +1347,7 @@
 		display: inline-flex;
 		align-items: center;
 		gap: var(--sp-3);
+		flex: 0 0 auto;
 	}
 	.sw-pair {
 		display: inline-flex;
@@ -1377,6 +1388,7 @@
 		border: 1px solid var(--line);
 		border-radius: var(--radius-sm);
 		overflow: hidden;
+		flex: 0 0 auto;
 	}
 	.density button {
 		display: flex;
@@ -1417,6 +1429,9 @@
 		display: inline-flex;
 		align-items: center;
 		gap: var(--sp-2);
+		row-gap: 5px;
+		flex-wrap: wrap;
+		min-width: 0;
 	}
 	/* Counter chip: pill shape, group-accent (smoke) family, signals "forming a new object". */
 	.range-chip {
@@ -2003,5 +2018,53 @@
 		color: var(--muted);
 		background: var(--panel-2);
 		border-color: var(--line);
+	}
+
+	@media (max-width: 820px) {
+		.toolbar {
+			gap: var(--sp-2);
+			padding: var(--sp-2) var(--sp-3);
+		}
+		.tb-divider {
+			display: none;
+		}
+		.grow {
+			display: none;
+		}
+		.kinds {
+			flex-basis: 100%;
+			order: 5;
+		}
+		.legend {
+			margin-left: auto;
+		}
+		.stage,
+		.stage.isgrid {
+			padding: var(--sp-2);
+		}
+	}
+
+	@media (max-width: 560px) {
+		.toolbar {
+			align-items: flex-start;
+		}
+		.tiers,
+		.legend,
+		.density,
+		.range-bar {
+			flex-basis: 100%;
+		}
+		.legend {
+			margin-left: 0;
+		}
+		.density button {
+			flex: 1 1 0;
+		}
+		.density-readout {
+			flex: 1 1 42px;
+		}
+		.transcript {
+			max-width: 100%;
+		}
 	}
 </style>
