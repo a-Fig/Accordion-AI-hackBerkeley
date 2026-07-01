@@ -3,6 +3,7 @@
 	import { cubicOut } from "svelte/easing";
 	import type { AccordionStore } from "../../engine/store.svelte";
 	import type { Block, Group } from "../../engine/types";
+	import { reductionPct } from "../../engine/tokens";
 	import Icon from "$lib/ui/Icon.svelte";
 
 	let {
@@ -145,6 +146,9 @@
 					{#if gSavedTok > 0}
 						<span class="tok-saved mono">saves {fmt(gSavedTok)}</span>
 					{/if}
+					{#if gSavedTok > 0}
+						<span class="tok-reduction mono">−{reductionPct(gFullTok, gLiveTok)}%</span>
+					{/if}
 				</div>
 			</div>
 
@@ -278,6 +282,7 @@
 							<span class="tok-key">live</span>
 							<span class="tok-val tok-live">{fmt(store.effTokens(block))}</span>
 						</span>
+						<span class="tok-reduction mono">−{reductionPct(block.tokens, store.effTokens(block))}%</span>
 					{:else}
 						<span class="tok-row">
 							<span class="tok-key">tokens</span>
@@ -606,6 +611,11 @@
 	.tok-saved {
 		color: var(--ok);
 		font-size: var(--fs-xs);
+	}
+	.tok-reduction {
+		color: var(--muted); /* Smoke — brand label/metadata color */
+		font-size: var(--fs-xs);
+		white-space: nowrap;
 	}
 
 	/* Action row: buttons laid out in a flex row */

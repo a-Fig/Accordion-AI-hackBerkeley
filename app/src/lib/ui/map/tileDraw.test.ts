@@ -245,6 +245,35 @@ describe("TileSpec colorKind", () => {
   });
 });
 
+describe("TileSpec reductionPct", () => {
+  it("folded spec can carry a reductionPct badge value", () => {
+    const spec: TileSpec = {
+      id: "abc",
+      kind: "text",
+      face: 2,
+      folded: true,
+      pinned: false,
+      selected: false,
+      inrange: false,
+      reductionPct: 73,
+    };
+    expect(spec.reductionPct).toBe(73);
+  });
+
+  it("reductionPct is optional (absent on live tiles)", () => {
+    const spec: TileSpec = {
+      id: "abc",
+      kind: "text",
+      face: 2,
+      folded: false,
+      pinned: false,
+      selected: false,
+      inrange: false,
+    };
+    expect(spec.reductionPct).toBeUndefined();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // resetSprites / _spritesDpr — cache invalidation (Fix 3)
 // ---------------------------------------------------------------------------

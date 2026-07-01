@@ -1,0 +1,66 @@
+import { describe, it, expect } from "vitest";
+import { estTokens, BLOCK_OVERHEAD, clip, firstLine, reductionPct } from "./tokens";
+
+// ---------------------------------------------------------------------------
+// reductionPct — fold aggressiveness as whole-percent of tokens removed
+// ---------------------------------------------------------------------------
+
+describe("reductionPct", () => {
+	it("returns the rounded whole-percent of tokens removed", () => {
+		// 1000 full, 250 live -> 750 saved -> 75%
+		expect(reductionPct(1000, 250)).toBe(75);
+	});
+
+	it("rounds to the nearest whole percent", () => {
+		// 1000 full, 333 live -> 667 saved -> 66.7% -> 67%
+		expect(reductionPct(1000, 333)).toBe(67);
+		// 1000 full, 334 live -> 666 saved -> 66.6% -> 67%
+		expect(reductionPct(1000, 334)).toBe(67);
+		// 1000 full, 336 live -> 664 saved -> 66.4% -> 66%
+		expect(reductionPct(1000, 336)).toBe(66);
+	});
+
+	it("returns 100 when everything was removed (drop group / empty digest)", () => {
+		expect(reductionPct(500, 0)).toBe(100);
+	});
+
+	it("returns 0 when nothing was removed (live == full)", () => {
+		expect(reductionPct(500, 500)).toBe(0);
+	});
+
+	it("returns 0 for a zero-token block (divide-by-zero guard)", () => {
+		expect(reductionPct(0, 0)).toBe(0);
+		expect(reductionPct(0, 5)).toBe(0);
+	});
+
+	it("never returns negative even if live exceeds full (defensive)", () => {
+		// A substitution larger than the original should not produce a negative %.
+		// Math.round of a negative fraction is <= 0; the caller renders no tag for <= 0.
+		expect(reductionPct(100, 150)).toBeLessThanOrEqual(0);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// estTokens — smoke-check the existing exports still work (regression guard)
+// ---------------------------------------------------------------------------
+
+describe("estTokens (regression)", () => {
+	it("estimates ~4 chars per token with overhead-aware ceil", () => {
+		expect(estTokens("")).toBe(0);
+		expect(estTokens("abcd")).toBe(1);
+		expect(estTokens("abcde")).toBe(2); // ceil(5/4)
+	});
+	it("exports BLOCK_OVERHEAD", () => {
+		expect(BLOCK_OVERHEAD).toBe(4);
+	});
+});
+
+describe("clip / firstLine (regression)", () => {
+	it("clip trims and ellipsizes", () => {
+		expect(clip("hello world", 5)).toBe("hell…");
+		expect(clip("hi", 5)).toBe("hi");
+	});
+	it("firstLine returns the first non-blank line, clipped", () => {
+		expect(firstLine("\n\n  hello world\nsecond", 5)).toBe("hell…");
+	});
+});

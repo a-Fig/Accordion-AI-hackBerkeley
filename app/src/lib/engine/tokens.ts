@@ -25,3 +25,17 @@ export function firstLine(s: string, n = 100): string {
 	const line = (s.split("\n").find((l) => l.trim()) ?? "").trim();
 	return clip(line, n);
 }
+
+
+/**
+ * Reduction percentage of a fold: the whole-percent of tokens REMOVED from the
+ * wire (saved / full x 100). Pure - no store access; callers supply the full and
+ * live token counts. Returns 0 for a zero-token block (divide-by-zero guard ->
+ * renders no tag, since nothing was removed). The Map header already reports
+ * "saves X tok", so "% removed" reads as the fold's aggressiveness and stays
+ * consistent with that existing copy.
+ */
+export function reductionPct(full: number, live: number): number {
+	if (full <= 0) return 0;
+	return Math.round(((full - live) / full) * 100);
+}

@@ -39,6 +39,15 @@ export type TileSpec = {
    * Mirrors the old `.cell.ghost.k-{kind}` CSS class. Defaults to "text" if absent.
    */
   colorKind?: BlockKind;
+  /**
+   * Fold reduction: whole-percent of tokens REMOVED (0-100). When present and > 0,
+   * a small Smoke-mono badge is blitted onto folded block tiles and collapsed-group
+   * tiles so the human can read how aggressive each fold was. Absent/0 -> no badge.
+   * Live tiles never carry this. Drawn via a cached offscreen sprite (rounded to the
+   * nearest 5% -> <=21 sprites), blitted like the dice/hatch sprites - no per-tile
+   * fillText in the hot loop, no filter/gradient.
+   */
+  reductionPct?: number;
 };
 
 export type Palette = {
@@ -324,6 +333,47 @@ function getHatchSprite(size: number, dpr: number): HTMLCanvasElement {
 }
 
 // ---------------------------------------------------------------------------
+// Reduction-% sprite cache (PERF) - a folded tile's aggressiveness badge.
+// Like the hatch/dice sprites: rendered ONCE per distinct value (rounded to the
+// nearest 5% -> <=21 entries) to an offscreen canvas, then blitted with drawImage
+// in the hot loop. NO per-tile ctx.fillText, NO filter/gradient. The cache is
+// keyed by (cellSize, dpr); it is rebuilt wholesale when either changes (mirrors
+// the hatch sprite's single-entry rebuild on size change, bounding memory).
+// ---------------------------------------------------------------------------
+let _pctSprites: Map<number, HTMLCanvasElement> | null = null;
+let _pctKey = "";
+function getPctSprite(pct: number, size: number, dpr: number): HTMLCanvasElement {
+  const key = `${size}:${dpr}`;
+  if (!_pctSprites || _pctKey !== key) {
+    _pctSprites = new Map();
+    _pctKey = key;
+  }
+  // Round to nearest 5% so the sprite set stays tiny (<=21) and stable across tiny
+  // token fluctuations. The exact whole-percent is shown in the Inspector/Transcript;
+  // the dense Map tile trades precision for a cached, O(1)-per-tile blit.
+  const rounded = Math.round(pct / 5) * 5;
+  const c = _pctSprites.get(rounded);
+  if (c) return c;
+  const cv = document.createElement("canvas");
+  const px = Math.max(1, Math.round(size * dpr));
+  cv.width = px;
+  cv.height = px;
+  const cx = cv.getContext("2d")!;
+  cx.scale(dpr, dpr);
+  // Smoke (--muted #9A9A9A) mono label, bottom-centered, inset 2px. Faint alpha keeps
+  // the folded tile's recessed, drained calm (the #1 brand signal) - information, not
+  // decoration. Never a spectrum hue; never on a live tile.
+  const fs = Math.max(7, Math.round(size * 0.32));
+  cx.font = `500 ${fs}px "IBM Plex Mono", ui-monospace, monospace`;
+  cx.fillStyle = "rgba(154,154,154,0.8)";
+  cx.textAlign = "center";
+  cx.textBaseline = "bottom";
+  cx.fillText(String(rounded), size / 2, size - 2);
+  _pctSprites.set(rounded, cv);
+  return cv;
+}
+
+// ---------------------------------------------------------------------------
 // Geometry
 // ---------------------------------------------------------------------------
 
@@ -579,6 +629,13 @@ export function drawTile(
     ctx.lineWidth = 1;
     roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, r);
     ctx.stroke();
+  }
+
+  // ---- reduction % badge: folded blocks + collapsed groups (drawn LAST so it stays
+  // ---- readable over any selection/hover overlays; inset at the tile bottom so the
+  // ---- edge selection/pinned rings stay crisp). Cached sprite blit - O(1) per tile.
+  if (spec.reductionPct != null && spec.reductionPct > 0) {
+    ctx.drawImage(getPctSprite(spec.reductionPct, w, opts.dpr ?? 1), x, y, w, h);
   }
 
   ctx.restore();
