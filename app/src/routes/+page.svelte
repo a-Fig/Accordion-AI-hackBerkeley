@@ -138,15 +138,17 @@
 	// Browser-served mode is single-session: the extension that served this page hosts the
 	// live WS on the SAME origin port. This is the "way back" to the live session — e.g.
 	// after viewing the Demo — since the browser has no multi-session discovery to pick from.
-	// The per-session token the browser-served page carries (?token=… or the
-	// accordion_token cookie). Forwarded on the WS upgrade so an off-loopback
-	// (0.0.0.0-bound) session can be steered from a remote browser safely.
+	// Forward the per-session token (when present in the page URL ?token=…) on the
+	// WS upgrade so an off-loopback (0.0.0.0-bound) session can be steered from a
+	// remote browser. NOTE: the accordion_token cookie is HttpOnly, so JS cannot read
+	// it here — that is deliberate. On a reload without ?token=…, readServedToken()
+	// returns null and the WS URL carries no token, but the browser still sends the
+	// HttpOnly cookie on the same-origin WS upgrade and the extension's verifyWsUpgrade
+	// accepts that cookie (mirroring isWebAuthed). So the cookie fallback lives on the
+	// server side of the upgrade, not in JS.
 	function readServedToken(): string | null {
 		if (typeof window === "undefined") return null;
-		const q = new URLSearchParams(window.location.search).get("token");
-		if (q) return q;
-		const m = typeof document.cookie === "string" ? document.cookie.match(/accordion_token=([0-9a-f]+)/) : null;
-		return m ? m[1] : null;
+		return new URLSearchParams(window.location.search).get("token");
 	}
 
 	function reconnectServed(): void {

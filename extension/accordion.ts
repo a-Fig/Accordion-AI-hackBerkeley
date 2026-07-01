@@ -649,13 +649,27 @@ export default function accordionLive(pi: ExtensionAPI): void {
 	 * remote reachability safe by default: the token the user already has unlocks
 	 * steering for them, while a port-scanner on the network is refused.
 	 */
+	// The static-file surface (isWebAuthed) accepts the token via query OR the
+	// accordion_token cookie. The WS upgrade must accept the SAME cookie too: the cookie
+	// is HttpOnly (so JS can't read it to forward it on a reconnect without ?token=…),
+	// but the browser auto-sends it on a same-origin WS upgrade, which is the only path
+	// that lets a bookmarked/reloaded browser-served session re-steer off-loopback.
+	function hasAccordionCookie(req: http.IncomingMessage): boolean {
+		const cookie = req.headers["cookie"];
+		return typeof cookie === "string"
+			&& cookie.split(";").some((c) => c.trim() === `accordion_token=${webToken}`);
+	}
+
 	function verifyWsUpgrade(info: { req: http.IncomingMessage }, cb: (res: boolean, code?: number, message?: string) => void): void {
 		const peer = info.req.socket.remoteAddress;
 		if (isLoopbackPeer(peer)) { cb(true); return; }
-		// Off-loopback peer: require the session token on the upgrade URL (?token=…).
+		// Off-loopback peer: require the per-session token. The browser-served page
+		// forwards it on the upgrade URL (?token=…) on first load; on a later reload
+		// without ?token=… the browser still sends the HttpOnly accordion_token cookie,
+		// which we accept here so the same source of truth authorizes both halves.
 		const u = new URL(info.req.url || "/", "http://accordion.local");
 		const token = u.searchParams.get("token");
-		if (webToken && token === webToken) { cb(true); return; }
+		if (webToken && (token === webToken || hasAccordionCookie(info.req))) { cb(true); return; }
 		cb(false, 401, "unauthorized — open Accordion via the /accordion Browser link (it carries the session token)");
 	}
 
