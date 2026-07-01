@@ -33,10 +33,16 @@ describe("reductionPct", () => {
 		expect(reductionPct(0, 5)).toBe(0);
 	});
 
-	it("never returns negative even if live exceeds full (defensive)", () => {
-		// A substitution larger than the original should not produce a negative %.
-		// Math.round of a negative fraction is <= 0; the caller renders no tag for <= 0.
-		expect(reductionPct(100, 150)).toBeLessThanOrEqual(0);
+	it("clamps to 0 if live exceeds full (oversized substitution)", () => {
+		// A conductor replacement larger than the original must never render as a
+		// negative "tokens removed" value; clamp to the documented [0, 100] range.
+		expect(reductionPct(100, 150)).toBe(0);
+		expect(reductionPct(100, 101)).toBe(0);
+	});
+
+	it("clamps to 100 (drop group / fully removed)", () => {
+		expect(reductionPct(100, 0)).toBe(100);
+		expect(reductionPct(100, -5)).toBe(100);
 	});
 });
 

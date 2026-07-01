@@ -37,5 +37,9 @@ export function firstLine(s: string, n = 100): string {
  */
 export function reductionPct(full: number, live: number): number {
 	if (full <= 0) return 0;
-	return Math.round(((full - live) / full) * 100);
+	// Clamp to [0, 100]: a conductor substitution can be LARGER than the original
+	// block, which would otherwise yield a negative "tokens removed" and render as
+	// a stray minus sign on every fold surface. 0 = nothing removed, 100 = fully gone.
+	const pct = Math.round(((full - live) / full) * 100);
+	return Math.max(0, Math.min(100, pct));
 }
