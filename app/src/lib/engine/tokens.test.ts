@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { estTokens, BLOCK_OVERHEAD, clip, firstLine, reductionPct } from "./tokens";
+import { estTokens, BLOCK_OVERHEAD, clip, firstLine, reductionPct, reductionDigit } from "./tokens";
 
 // ---------------------------------------------------------------------------
 // reductionPct — fold aggressiveness as whole-percent of tokens removed
@@ -43,6 +43,32 @@ describe("reductionPct", () => {
 	it("clamps to 100 (drop group / fully removed)", () => {
 		expect(reductionPct(100, 0)).toBe(100);
 		expect(reductionPct(100, -5)).toBe(100);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// reductionDigit — decile bucket (0-9) for the compact on-tile badge
+// ---------------------------------------------------------------------------
+
+describe("reductionDigit", () => {
+	it("drops the ones place and keeps the tens digit", () => {
+		expect(reductionDigit(73)).toBe(7);
+		expect(reductionDigit(40)).toBe(4);
+		expect(reductionDigit(99)).toBe(9);
+	});
+
+	it("floors any 1-9% reduction to 0 (still shown, not hidden)", () => {
+		expect(reductionDigit(1)).toBe(0);
+		expect(reductionDigit(9)).toBe(0);
+	});
+
+	it("floors an exact 0% reduction to 0", () => {
+		expect(reductionDigit(0)).toBe(0);
+	});
+
+	it("clamps a 100% (fully removed) reduction to 9, not 10", () => {
+		expect(reductionDigit(100)).toBe(9);
+		expect(reductionDigit(90)).toBe(9);
 	});
 });
 

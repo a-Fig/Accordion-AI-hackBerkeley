@@ -43,3 +43,14 @@ export function reductionPct(full: number, live: number): number {
 	const pct = Math.round(((full - live) / full) * 100);
 	return Math.max(0, Math.min(100, pct));
 }
+
+/**
+ * Reduction as a single decile digit (0-9): drop the ones place, keep the tens
+ * digit of reductionPct. Used only for the compact badge stamped directly on a
+ * folded tile — a coarser, faster-to-scan signal than the precise "-X%" text
+ * shown in tooltips/Transcript/Inspector. Clamped to 9 so a 100% (fully
+ * removed) fold doesn't overflow to two digits.
+ */
+export function reductionDigit(pct: number): number {
+	return Math.min(9, Math.max(0, Math.floor(pct / 10)));
+}

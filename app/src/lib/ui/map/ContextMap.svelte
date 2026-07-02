@@ -6,7 +6,7 @@
 	import { ghosts } from "../../live/ghostState.svelte";
 	import { nextVacated } from "./drain";
 	import { buildDisplay, segmentDisplay, buildLane, type DisplayRow } from "$lib/engine/display";
-	import { reductionPct } from "$lib/engine/tokens";
+	import { reductionPct, reductionDigit } from "$lib/engine/tokens";
 	import { settings } from "$lib/settings.svelte";
 	import Icon from "$lib/ui/Icon.svelte";
 	import SegControl from "$lib/ui/SegControl.svelte";
@@ -1071,7 +1071,7 @@
 													data-summary={b.id}
 													title={foldTip(b)}
 												>
-													<span class="cell-pct mono">{reductionPct(b.tokens, store.effTokens(b))}</span>
+													<span class="cell-pct mono">{reductionDigit(reductionPct(b.tokens, store.effTokens(b)))}</span>
 												</div>
 												{@render sliverTile(b, true)}
 											</div>
@@ -1089,7 +1089,7 @@
 													data-group={g.id}
 													title={groupTip(g)}
 												>
-													{#if g.folded}<span class="cell-pct mono">{reductionPct(store.groupFullTokens(g), store.groupLiveTokens(g))}</span>{/if}
+													{#if g.folded}<span class="cell-pct mono">{reductionDigit(reductionPct(store.groupFullTokens(g), store.groupLiveTokens(g)))}</span>{/if}
 												</div>
 												{#each item.members as m (m.id)}
 													{@render sliverTile(m, false)}
@@ -1127,7 +1127,7 @@
 												? `drop group · ${seg.row.members.length} blocks · The agent does not see this block · double-click to collapse`
 												: `${live ? 'group (unfolded — live)' : 'group (peek — preview only)'} · ${seg.row.members.length} blocks · double-click to collapse`}
 										>
-											{#if !live}<span class="cell-pct mono">{reductionPct(store.groupFullTokens(g), store.groupLiveTokens(g))}</span>{/if}
+											{#if !live}<span class="cell-pct mono">{reductionDigit(reductionPct(store.groupFullTokens(g), store.groupLiveTokens(g)))}</span>{/if}
 										</div>
 										<div class="band-members">
 											{#each seg.row.members as mb (mb.id)}
@@ -1868,9 +1868,10 @@
 		flex: 0 0 auto;
 		cursor: pointer;
 	}
-	/* Reduction-% badge on sliver-mode summary tiles + open-group parent tiles.
-	   Smoke mono, inset at the tile bottom — the same calm recessed label the canvas
-	   draws via the cached % sprite. Information, not decoration (brand: folded = calm). */
+	/* Reduction-digit (0-9) badge on sliver-mode summary tiles + open-group parent
+	   tiles. Smoke mono, inset at the tile bottom — the same calm recessed label the
+	   canvas draws via the cached digit sprite. Information, not decoration (brand:
+	   folded = calm). */
 	.cell-pct {
 		position: absolute;
 		left: 0;

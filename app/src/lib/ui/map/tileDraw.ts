@@ -13,6 +13,7 @@
  */
 
 import type { BlockKind } from "../../engine/types";
+import { reductionDigit } from "../../engine/tokens";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,11 +42,12 @@ export type TileSpec = {
   colorKind?: BlockKind;
   /**
    * Fold reduction: whole-percent of tokens REMOVED (0-100). When present and > 0,
-   * a small Smoke-mono badge is blitted onto folded block tiles and collapsed-group
-   * tiles so the human can read how aggressive each fold was. Absent/0 -> no badge.
-   * Live tiles never carry this. Drawn via a cached offscreen sprite (rounded to the
-   * nearest 5% -> <=21 sprites), blitted like the dice/hatch sprites - no per-tile
-   * fillText in the hot loop, no filter/gradient.
+   * a small Smoke-mono single-digit badge is blitted onto folded block tiles and
+   * collapsed-group tiles so the human can read how aggressive each fold was, at a
+   * glance (drop the ones place, keep the tens digit -> 0-9; a 100% reduction
+   * clamps to 9). Absent/0 -> no badge. Live tiles never carry this. Drawn via a
+   * cached offscreen sprite (one per digit, 0-9 -> <=10 sprites), blitted like the
+   * dice/hatch sprites - no per-tile fillText in the hot loop, no filter/gradient.
    */
   reductionPct?: number;
 };
@@ -333,12 +335,12 @@ function getHatchSprite(size: number, dpr: number): HTMLCanvasElement {
 }
 
 // ---------------------------------------------------------------------------
-// Reduction-% sprite cache (PERF) - a folded tile's aggressiveness badge.
-// Like the hatch/dice sprites: rendered ONCE per distinct value (rounded to the
-// nearest 5% -> <=21 entries) to an offscreen canvas, then blitted with drawImage
-// in the hot loop. NO per-tile ctx.fillText, NO filter/gradient. The cache is
-// keyed by (cellSize, dpr); it is rebuilt wholesale when either changes (mirrors
-// the hatch sprite's single-entry rebuild on size change, bounding memory).
+// Reduction-digit sprite cache (PERF) - a folded tile's aggressiveness badge.
+// Like the hatch/dice sprites: rendered ONCE per distinct digit (0-9 -> <=10
+// entries) to an offscreen canvas, then blitted with drawImage in the hot loop.
+// NO per-tile ctx.fillText, NO filter/gradient. The cache is keyed by
+// (cellSize, dpr); it is rebuilt wholesale when either changes (mirrors the
+// hatch sprite's single-entry rebuild on size change, bounding memory).
 // ---------------------------------------------------------------------------
 let _pctSprites: Map<number, HTMLCanvasElement> | null = null;
 let _pctKey = "";
@@ -348,11 +350,11 @@ function getPctSprite(pct: number, size: number, dpr: number): HTMLCanvasElement
     _pctSprites = new Map();
     _pctKey = key;
   }
-  // Round to nearest 5% so the sprite set stays tiny (<=21) and stable across tiny
-  // token fluctuations. The exact whole-percent is shown in the Inspector/Transcript;
-  // the dense Map tile trades precision for a cached, O(1)-per-tile blit.
-  const rounded = Math.round(pct / 5) * 5;
-  const c = _pctSprites.get(rounded);
+  // Drop the ones place, keep the tens digit (0-9). The exact whole-percent is
+  // shown in the Inspector/Transcript/tooltips; the dense Map tile trades
+  // precision for a single glanceable digit + a cached, O(1)-per-tile blit.
+  const digit = reductionDigit(pct);
+  const c = _pctSprites.get(digit);
   if (c) return c;
   const cv = document.createElement("canvas");
   const px = Math.max(1, Math.round(size * dpr));
@@ -368,8 +370,8 @@ function getPctSprite(pct: number, size: number, dpr: number): HTMLCanvasElement
   cx.fillStyle = "rgba(154,154,154,0.8)";
   cx.textAlign = "center";
   cx.textBaseline = "bottom";
-  cx.fillText(String(rounded), size / 2, size - 2);
-  _pctSprites.set(rounded, cv);
+  cx.fillText(String(digit), size / 2, size - 2);
+  _pctSprites.set(digit, cv);
   return cv;
 }
 
@@ -631,9 +633,9 @@ export function drawTile(
     ctx.stroke();
   }
 
-  // ---- reduction % badge: folded blocks + collapsed groups (drawn LAST so it stays
-  // ---- readable over any selection/hover overlays; inset at the tile bottom so the
-  // ---- edge selection/pinned rings stay crisp). Cached sprite blit - O(1) per tile.
+  // ---- reduction digit badge: folded blocks + collapsed groups (drawn LAST so it
+  // ---- stays readable over any selection/hover overlays; inset at the tile bottom
+  // ---- so the edge selection/pinned rings stay crisp). Cached sprite blit - O(1) per tile.
   if (spec.reductionPct != null && spec.reductionPct > 0) {
     ctx.drawImage(getPctSprite(spec.reductionPct, w, opts.dpr ?? 1), x, y, w, h);
   }
