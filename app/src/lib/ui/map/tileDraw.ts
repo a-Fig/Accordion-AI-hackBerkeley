@@ -13,7 +13,7 @@
  */
 
 import type { BlockKind } from "../../engine/types";
-import { reductionDigit } from "../../engine/tokens";
+import { remainingDigit } from "../../engine/tokens";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,15 +41,17 @@ export type TileSpec = {
    */
   colorKind?: BlockKind;
   /**
-   * Fold reduction: whole-percent of tokens REMOVED (0-100). When present and > 0,
-   * a small Smoke-mono single-digit badge is blitted onto folded block tiles and
-   * collapsed-group tiles so the human can read how aggressive each fold was, at a
-   * glance (drop the ones place, keep the tens digit -> 0-9; a 100% reduction
-   * clamps to 9). Absent/0 -> no badge. Live tiles never carry this. Drawn via a
-   * cached offscreen sprite (one per digit, 0-9 -> <=10 sprites), blitted like the
-   * dice/hatch sprites - no per-tile fillText in the hot loop, no filter/gradient.
+   * Fold remaining: whole-percent of tokens STILL on the wire (0-100). When
+   * present and < 100, a small Smoke-mono single-digit badge is blitted onto
+   * folded block tiles and collapsed-group tiles so the human can read how
+   * much of the original content is still visible, at a glance (drop the ones
+   * place, keep the tens digit -> 0-9; a 100% (fully intact) value clamps to
+   * 9, but that case is gated out below since nothing was folded). Absent/100
+   * -> no badge. Live tiles never carry this. Drawn via a cached offscreen
+   * sprite (one per digit, 0-9 -> <=10 sprites), blitted like the dice/hatch
+   * sprites - no per-tile fillText in the hot loop, no filter/gradient.
    */
-  reductionPct?: number;
+  remainingPct?: number;
 };
 
 export type Palette = {
@@ -335,7 +337,7 @@ function getHatchSprite(size: number, dpr: number): HTMLCanvasElement {
 }
 
 // ---------------------------------------------------------------------------
-// Reduction-digit sprite cache (PERF) - a folded tile's aggressiveness badge.
+// Remaining-digit sprite cache (PERF) - a folded tile's "how much is left" badge.
 // Like the hatch/dice sprites: rendered ONCE per distinct digit (0-9 -> <=10
 // entries) to an offscreen canvas, then blitted with drawImage in the hot loop.
 // NO per-tile ctx.fillText, NO filter/gradient. The cache is keyed by
@@ -353,7 +355,7 @@ function getPctSprite(pct: number, size: number, dpr: number): HTMLCanvasElement
   // Drop the ones place, keep the tens digit (0-9). The exact whole-percent is
   // shown in the Inspector/Transcript/tooltips; the dense Map tile trades
   // precision for a single glanceable digit + a cached, O(1)-per-tile blit.
-  const digit = reductionDigit(pct);
+  const digit = remainingDigit(pct);
   const c = _pctSprites.get(digit);
   if (c) return c;
   const cv = document.createElement("canvas");
@@ -633,11 +635,13 @@ export function drawTile(
     ctx.stroke();
   }
 
-  // ---- reduction digit badge: folded blocks + collapsed groups (drawn LAST so it
+  // ---- remaining digit badge: folded blocks + collapsed groups (drawn LAST so it
   // ---- stays readable over any selection/hover overlays; inset at the tile bottom
   // ---- so the edge selection/pinned rings stay crisp). Cached sprite blit - O(1) per tile.
-  if (spec.reductionPct != null && spec.reductionPct > 0) {
-    ctx.drawImage(getPctSprite(spec.reductionPct, w, opts.dpr ?? 1), x, y, w, h);
+  // ---- < 100 (not >= 0) is the gate: 100 means nothing was folded away, so there's
+  // ---- nothing worth badging.
+  if (spec.remainingPct != null && spec.remainingPct < 100) {
+    ctx.drawImage(getPctSprite(spec.remainingPct, w, opts.dpr ?? 1), x, y, w, h);
   }
 
   ctx.restore();

@@ -245,8 +245,8 @@ describe("TileSpec colorKind", () => {
   });
 });
 
-describe("TileSpec reductionPct", () => {
-  it("folded spec can carry a reductionPct badge value", () => {
+describe("TileSpec remainingPct", () => {
+  it("folded spec can carry a remainingPct badge value", () => {
     const spec: TileSpec = {
       id: "abc",
       kind: "text",
@@ -255,12 +255,12 @@ describe("TileSpec reductionPct", () => {
       pinned: false,
       selected: false,
       inrange: false,
-      reductionPct: 73,
+      remainingPct: 27,
     };
-    expect(spec.reductionPct).toBe(73);
+    expect(spec.remainingPct).toBe(27);
   });
 
-  it("reductionPct is optional (absent on live tiles)", () => {
+  it("remainingPct is optional (absent on live tiles)", () => {
     const spec: TileSpec = {
       id: "abc",
       kind: "text",
@@ -270,7 +270,7 @@ describe("TileSpec reductionPct", () => {
       selected: false,
       inrange: false,
     };
-    expect(spec.reductionPct).toBeUndefined();
+    expect(spec.remainingPct).toBeUndefined();
   });
 });
 

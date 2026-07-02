@@ -6,7 +6,7 @@
 	import { ghosts } from "../../live/ghostState.svelte";
 	import { nextVacated } from "./drain";
 	import { buildDisplay, segmentDisplay, buildLane, type DisplayRow } from "$lib/engine/display";
-	import { reductionPct, reductionDigit } from "$lib/engine/tokens";
+	import { remainingPct, remainingDigit } from "$lib/engine/tokens";
 	import { settings } from "$lib/settings.svelte";
 	import Icon from "$lib/ui/Icon.svelte";
 	import SegControl from "$lib/ui/SegControl.svelte";
@@ -134,7 +134,7 @@
 					pinned: b.override === "pinned",
 					selected: b.id === selectedId,
 					inrange: rangeSet.has(b.id),
-					reductionPct: store.isFolded(b) ? reductionPct(b.tokens, store.effTokens(b)) : undefined,
+					remainingPct: store.isFolded(b) ? remainingPct(b.tokens, store.effTokens(b)) : undefined,
 				});
 			} else {
 				// collapsed group tile
@@ -147,7 +147,7 @@
 					pinned: false,
 					selected: selectedId === g.id,
 					inrange: false,
-					reductionPct: g.folded ? reductionPct(store.groupFullTokens(g), store.groupLiveTokens(g)) : undefined,
+					remainingPct: g.folded ? remainingPct(store.groupFullTokens(g), store.groupLiveTokens(g)) : undefined,
 				});
 			}
 		}
@@ -181,7 +181,7 @@
 				pinned: b.override === "pinned",
 				selected: b.id === selectedId,
 				inrange: false, // protected tiles can't be in a range
-				reductionPct: store.isFolded(b) ? reductionPct(b.tokens, store.effTokens(b)) : undefined,
+				remainingPct: store.isFolded(b) ? remainingPct(b.tokens, store.effTokens(b)) : undefined,
 			});
 		}
 		// ghost tiles
@@ -374,7 +374,7 @@
 	function tip(b: Block, prot = false): string {
 		const tool = b.toolName ? ` ${b.toolName}` : "";
 		const folded = store.isFolded(b);
-		const f = folded ? ` · folded ${b.tokens}→${store.effTokens(b)} (−${reductionPct(b.tokens, store.effTokens(b))}%)` : "";
+		const f = folded ? ` · folded ${b.tokens}→${store.effTokens(b)} (${remainingPct(b.tokens, store.effTokens(b))}% remains)` : "";
 		// The hint mirrors what a double-click actually DOES — steerLocked makes it a no-op, else
 		// store.toggle gated by canFold — so the tile never advertises a fold the gate would refuse:
 		// a conductor lock, a live user/tool_call, a pin, or the protected tail. Unfold stays for a folded block.
@@ -399,7 +399,7 @@
 		const turns = members.length > 0
 			? `turns ${members[0].turn}–${members[members.length - 1].turn}`
 			: "";
-		const savedStr = saved > 0 ? ` · saves ${k(saved)} tok (−${reductionPct(full, full - saved)}%)` : "";
+		const savedStr = saved > 0 ? ` · saves ${k(saved)} tok (${remainingPct(full, full - saved)}% remains)` : "";
 		const stragStr = strag > 0 ? ` · ${strag} kept live` : "";
 		if (store.isDropGroup(g)) {
 			return `drop group · ${members.length} blocks · ${k(saved)} tok removed${stragStr}\n${turns}\nThe agent does not see this block\nclick to inspect`;
@@ -413,7 +413,7 @@
 	 *  The dice face on the cocoa shows ITS size (the digest); the sliver beside it carries the
 	 *  original block's weight. */
 	function foldTip(b: Block): string {
-		return `folded · ${k(b.tokens)}→${k(store.effTokens(b))} tok · −${reductionPct(b.tokens, store.effTokens(b))}% · click to inspect · double-click to unfold`;
+		return `folded · ${k(b.tokens)}→${k(store.effTokens(b))} tok · ${remainingPct(b.tokens, store.effTokens(b))}% remains · click to inspect · double-click to unfold`;
 	}
 
 	// ---- range selection state (local — for creating groups) ----------------
@@ -1071,7 +1071,7 @@
 													data-summary={b.id}
 													title={foldTip(b)}
 												>
-													<span class="cell-pct mono">{reductionDigit(reductionPct(b.tokens, store.effTokens(b)))}</span>
+													<span class="cell-pct mono">{remainingDigit(remainingPct(b.tokens, store.effTokens(b)))}</span>
 												</div>
 												{@render sliverTile(b, true)}
 											</div>
@@ -1089,7 +1089,7 @@
 													data-group={g.id}
 													title={groupTip(g)}
 												>
-													{#if g.folded}<span class="cell-pct mono">{reductionDigit(reductionPct(store.groupFullTokens(g), store.groupLiveTokens(g)))}</span>{/if}
+													{#if g.folded}<span class="cell-pct mono">{remainingDigit(remainingPct(store.groupFullTokens(g), store.groupLiveTokens(g)))}</span>{/if}
 												</div>
 												{#each item.members as m (m.id)}
 													{@render sliverTile(m, false)}
@@ -1127,7 +1127,7 @@
 												? `drop group · ${seg.row.members.length} blocks · The agent does not see this block · double-click to collapse`
 												: `${live ? 'group (unfolded — live)' : 'group (peek — preview only)'} · ${seg.row.members.length} blocks · double-click to collapse`}
 										>
-											{#if !live}<span class="cell-pct mono">{reductionDigit(reductionPct(store.groupFullTokens(g), store.groupLiveTokens(g)))}</span>{/if}
+											{#if !live}<span class="cell-pct mono">{remainingDigit(remainingPct(store.groupFullTokens(g), store.groupLiveTokens(g)))}</span>{/if}
 										</div>
 										<div class="band-members">
 											{#each seg.row.members as mb (mb.id)}
@@ -1185,7 +1185,7 @@
 								{k(store.effTokens(b))}{#if folded}<span class="dim">/{k(b.tokens)}</span>{/if} tok
 							</span>
 							{#if folded}
-								<span class="tr-reduction mono" title="tokens removed by this fold">−{reductionPct(b.tokens, store.effTokens(b))}%</span>
+								<span class="tr-remaining mono" title="percentage of tokens still on the wire">{remainingPct(b.tokens, store.effTokens(b))}% remains</span>
 							{/if}
 							{#if prot}
 								<span class="tr-flag" title="protected working tail — never folds"><Icon name="lock" size={10} /></span>
@@ -1868,7 +1868,7 @@
 		flex: 0 0 auto;
 		cursor: pointer;
 	}
-	/* Reduction-digit (0-9) badge on sliver-mode summary tiles + open-group parent
+	/* Remaining-digit (0-9) badge on sliver-mode summary tiles + open-group parent
 	   tiles. Smoke mono, inset at the tile bottom — the same calm recessed label the
 	   canvas draws via the cached digit sprite. Information, not decoration (brand:
 	   folded = calm). */
@@ -2021,7 +2021,7 @@
 		font-size: var(--fs-xs);
 		color: var(--faint);
 	}
-	.tr-reduction {
+	.tr-remaining {
 		font-size: var(--fs-xs);
 		color: var(--muted); /* Smoke — brand label/metadata color */
 		white-space: nowrap;
